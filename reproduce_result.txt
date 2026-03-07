@@ -1,0 +1,12 @@
+Testing extraction on: 'Solve for x, 5.9 = x + 5.11'
+Using extract_equations_advanced function...
+
+Extraction Results (Decimal):
+Equations: ['Solve for x, 5.9 = x + 5.11']
+
+Testing extraction on: 'Solve for x, 6 = x + 5'
+
+Extraction Results (Integer):
+Equations: ['Solve for x, 6 = x + 5']
+
+SUCCESS: Correct equation extracted.
