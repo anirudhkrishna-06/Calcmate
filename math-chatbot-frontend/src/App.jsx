@@ -11,6 +11,9 @@ import ChatbotPage from './pages/ChatbotPage';
 import ProfilePage from './pages/ProfilePage';
 import QuizPage from './pages/QuizPage';
 import StreakPage from './pages/StreakPage';
+import ThinkingSetupPage from './pages/ThinkingSetupPage';
+import ThinkingSessionPage from './pages/ThinkingSessionPage';
+import ThinkingReportPage from './pages/ThinkingReportPage';
 
 import './index.css';
 
@@ -112,6 +115,30 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <StreakPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/thinking-setup"
+          element={
+            <ProtectedRoute>
+              <ThinkingSetupPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/thinking-session"
+          element={
+            <ProtectedRoute>
+              <ThinkingSessionPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/thinking-report"
+          element={
+            <ProtectedRoute>
+              <ThinkingReportPage />
             </ProtectedRoute>
           }
         />

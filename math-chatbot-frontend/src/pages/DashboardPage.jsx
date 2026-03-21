@@ -9,6 +9,7 @@ import {
     TrendingUp,
     ArrowRight,
     Clock,
+    Lightbulb,
 } from 'lucide-react';
 import Navbar from '../components/Navbar';
 import PageTransition from '../components/PageTransition';
@@ -25,6 +26,14 @@ export default function DashboardPage() {
     };
 
     const cards = [
+        {
+            title: 'Live Thinking Session',
+            desc: 'Improve how you think, not just solve. Step-by-step guided math sessions.',
+            icon: Lightbulb,
+            color: 'blue',
+            path: '/thinking-setup',
+            badge: 'New',
+        },
         {
             title: 'Ask a Question',
             desc: 'Chat with our AI solver. Upload images or type your math problem.',
