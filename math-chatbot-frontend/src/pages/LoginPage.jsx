@@ -201,7 +201,7 @@ export default function LoginPage() {
                         >
                             <p className="text-xs text-blue-700 font-medium mb-1">Demo credentials</p>
                             <p className="text-xs text-blue-600 font-mono">
-                                demo@mathmend.com / demo123
+                                {import.meta.env.VITE_DEMO_EMAIL} / {import.meta.env.VITE_DEMO_PASSWORD}
                             </p>
                         </motion.div>
                     )}

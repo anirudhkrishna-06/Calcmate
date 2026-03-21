@@ -4,7 +4,13 @@ const AuthContext = createContext(null);
 
 // Mock users database
 const MOCK_USERS = [
-    { id: 1, email: 'demo@mathmend.com', password: 'demo123', name: 'Alex Johnson', avatar: null },
+    { 
+        id: 1, 
+        email: import.meta.env.VITE_DEMO_EMAIL, 
+        password: import.meta.env.VITE_DEMO_PASSWORD, 
+        name: 'Alex Johnson', 
+        avatar: null 
+    },
     { id: 2, email: 'student@mathmend.com', password: 'student123', name: 'Sam Rivera', avatar: null },
 ];
 
