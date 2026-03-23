@@ -25,8 +25,8 @@ logger = logging.getLogger("cognitive_engine.main")
 
 app = FastAPI(
     title="TCMTE Cognitive Engine",
-    version="0.3.0-phase3",
-    description="Phase 3 orchestrated cognitive runtime for real-time math thinking sessions.",
+    version="0.6.0-phase6",
+    description="Phase 6 cognitive runtime with problem structuring, method graph generation, symbolic representation, contextual cognition, and live session orchestration.",
 )
 
 app.add_middleware(
@@ -45,7 +45,7 @@ app.add_middleware(
 
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
-    return {"status": "ok", "phase": "phase_3_orchestrator"}
+    return {"status": "ok", "phase": "phase_6_problem_structuring_engine"}
 
 
 @app.post("/start_session")
@@ -60,13 +60,14 @@ async def stream_audio_chunk(payload: StreamAudioChunkRequest):
     try:
         response = await orchestrator.stream_audio_chunk(payload)
         logger.info(
-            "Chunk processed | session=%s chunk=%s intent=%s confidence=%.2f phase=%s intervention=%s",
+            "Chunk processed | session=%s chunk=%s intent=%s confidence=%.2f phase=%s intervention=%s transcript=%s",
             response.session_id,
             response.chunk_id,
             response.detected_intent.value,
             response.confidence,
             response.current_phase.value,
             response.intervention_recommended,
+            response.transcript_excerpt if response.transcript_excerpt else "<none>",
         )
         return response
     except KeyError as exc:

@@ -97,7 +97,10 @@ export default function ThinkingSessionPage() {
     const animationFrameRef = useRef(null);
     const featureStatsRef = useRef(null);
     const interventionTimeoutRef = useRef(null);
+    const recordingTimerRef = useRef(null);
+    const recorderChunksRef = useRef([]);
     const streamingEnabledRef = useRef(false);
+    const desiredMicStateRef = useRef('idle');
     const recorderMimeTypeRef = useRef('');
 
     useEffect(() => {
@@ -109,19 +112,19 @@ export default function ThinkingSessionPage() {
     }, [sessionId]);
 
     useEffect(() => {
-        if (isAnalyzing) {
-            setStatusText('Analyzing...');
-            return;
-        }
+        desiredMicStateRef.current = micStatus;
+    }, [micStatus]);
+
+    useEffect(() => {
         if (isIntervening) {
             setStatusText('Intervention...');
             return;
         }
-        if (uiState === 'completed') {
-            setStatusText('Idle...');
+        if (isAnalyzing) {
+            setStatusText('Analyzing...');
             return;
         }
-        if (uiState !== 'active') {
+        if (uiState === 'completed' || uiState !== 'active') {
             setStatusText('Idle...');
             return;
         }
@@ -175,36 +178,34 @@ export default function ThinkingSessionPage() {
         if (!stats || stats.frameCount === 0) {
             resetFeatureStats();
             return {
-                pause_before_seconds: 0,
-                speech_density: 0,
-                speech_energy: 0,
-                silence_ratio: 1,
-                token_density: 0,
+                rms_energy: 0,
+                speech_ratio: 0,
+                leading_silence: 0,
+                trailing_silence: 0,
+                noise_floor: 0,
+                voiced_frames: 0,
                 extra: {
                     peak_energy: 0,
-                    leading_silence_seconds: 0,
-                    trailing_silence_seconds: 0,
-                    noise_floor: 0,
                     speech_threshold: 0,
-                    voiced_frames_ratio: 0,
+                    silence_ratio: 1,
                 },
             };
         }
 
         const voicedRatio = stats.voicedFrames / stats.frameCount;
+        const rmsEnergy = stats.energyTotal / stats.frameCount;
         const payload = {
-            pause_before_seconds: Number(stats.leadingSilenceSeconds.toFixed(2)),
-            speech_density: Number(voicedRatio.toFixed(3)),
-            speech_energy: Number((stats.energyTotal / stats.frameCount).toFixed(3)),
-            silence_ratio: Number((1 - voicedRatio).toFixed(3)),
-            token_density: 0,
+            rms_energy: Number(rmsEnergy.toFixed(4)),
+            speech_ratio: Number(voicedRatio.toFixed(3)),
+            leading_silence: Number(stats.leadingSilenceSeconds.toFixed(2)),
+            trailing_silence: Number(stats.trailingSilenceSeconds.toFixed(2)),
+            noise_floor: Number(stats.noiseFloor.toFixed(4)),
+            voiced_frames: Number(voicedRatio.toFixed(3)),
             extra: {
-                peak_energy: Number(stats.peakEnergy.toFixed(3)),
-                leading_silence_seconds: Number(stats.leadingSilenceSeconds.toFixed(2)),
-                trailing_silence_seconds: Number(stats.trailingSilenceSeconds.toFixed(2)),
-                noise_floor: Number(stats.noiseFloor.toFixed(4)),
+                peak_energy: Number(stats.peakEnergy.toFixed(4)),
                 speech_threshold: Number(stats.speechThreshold.toFixed(4)),
-                voiced_frames_ratio: Number(voicedRatio.toFixed(3)),
+                silence_ratio: Number((1 - voicedRatio).toFixed(3)),
+                max_silence_seconds: Number(stats.maxSilenceSeconds.toFixed(2)),
             },
         };
         resetFeatureStats();
@@ -224,7 +225,13 @@ export default function ThinkingSessionPage() {
 
     function cleanupAudio() {
         streamingEnabledRef.current = false;
+        desiredMicStateRef.current = 'idle';
         recorderMimeTypeRef.current = '';
+        recorderChunksRef.current = [];
+        if (recordingTimerRef.current) {
+            window.clearTimeout(recordingTimerRef.current);
+            recordingTimerRef.current = null;
+        }
         if (animationFrameRef.current) {
             window.cancelAnimationFrame(animationFrameRef.current);
             animationFrameRef.current = null;
@@ -326,12 +333,12 @@ export default function ThinkingSessionPage() {
         chunkIndexRef.current = chunkIndex;
         const endTime = (performance.now() - sessionStartedAtRef.current) / 1000;
         const startTime = Math.max(0, endTime - CHUNK_DURATION_MS / 1000);
-        const audioPayload = await blobToBase64(blob);
+        const audioBlob = await blobToBase64(blob);
         const frontendFeatures = consumeFeatureStats();
         frontendFeatures.extra = {
             ...frontendFeatures.extra,
-            chunk_size_bytes: blob.size,
             mime_type: blob.type || recorderMimeTypeRef.current || 'audio/webm',
+            chunk_size_bytes: blob.size,
             chunk_duration_ms: CHUNK_DURATION_MS,
         };
 
@@ -343,11 +350,9 @@ export default function ThinkingSessionPage() {
                 body: JSON.stringify({
                     session_id: sessionIdRef.current,
                     chunk_id: `chunk_${chunkIndex}`,
-                    timestamp: {
-                        start_time: Number(startTime.toFixed(2)),
-                        end_time: Number(endTime.toFixed(2)),
-                    },
-                    audio_payload_b64: audioPayload,
+                    audio_blob: audioBlob,
+                    start_time: Number(startTime.toFixed(2)),
+                    end_time: Number(endTime.toFixed(2)),
                     frontend_features: frontendFeatures,
                     transcript_hint: null,
                 }),
@@ -355,6 +360,56 @@ export default function ThinkingSessionPage() {
         } finally {
             setIsAnalyzing(false);
         }
+    }
+
+    function scheduleRecorderStop() {
+        if (recordingTimerRef.current) {
+            window.clearTimeout(recordingTimerRef.current);
+        }
+        recordingTimerRef.current = window.setTimeout(() => {
+            const recorder = mediaRecorderRef.current;
+            if (recorder && recorder.state === 'recording') {
+                recorder.stop();
+            }
+        }, CHUNK_DURATION_MS);
+    }
+
+    function startRecorderCycle(stream) {
+        if (!streamingEnabledRef.current || desiredMicStateRef.current !== 'recording') {
+            return;
+        }
+
+        const mimeType = selectRecorderMimeType();
+        const recorder = mimeType
+            ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 128000 })
+            : new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+
+        recorderMimeTypeRef.current = recorder.mimeType || mimeType;
+        recorderChunksRef.current = [];
+        recorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+                recorderChunksRef.current.push(event.data);
+            }
+        };
+        recorder.onstop = async () => {
+            if (recordingTimerRef.current) {
+                window.clearTimeout(recordingTimerRef.current);
+                recordingTimerRef.current = null;
+            }
+            const chunks = recorderChunksRef.current;
+            recorderChunksRef.current = [];
+            const blob = chunks.length > 0 ? new Blob(chunks, { type: recorder.mimeType || recorderMimeTypeRef.current || 'audio/webm' }) : null;
+            if (blob && blob.size > 0 && streamingEnabledRef.current) {
+                await streamChunk(blob);
+            }
+            if (streamingEnabledRef.current && desiredMicStateRef.current === 'recording' && mediaStreamRef.current) {
+                resetFeatureStats();
+                startRecorderCycle(mediaStreamRef.current);
+            }
+        };
+        recorder.start();
+        mediaRecorderRef.current = recorder;
+        scheduleRecorderStop();
     }
 
     async function initializeAudioRuntime() {
@@ -383,18 +438,8 @@ export default function ThinkingSessionPage() {
         analyserRef.current = analyser;
         resetFeatureStats();
         streamingEnabledRef.current = true;
-
-        const mimeType = selectRecorderMimeType();
-        const recorder = mimeType
-            ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 128000 })
-            : new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
-        recorderMimeTypeRef.current = recorder.mimeType || mimeType;
-        recorder.ondataavailable = async (event) => {
-            if (!streamingEnabledRef.current || event.data.size === 0) return;
-            await streamChunk(event.data);
-        };
-        recorder.start(CHUNK_DURATION_MS);
-        mediaRecorderRef.current = recorder;
+        desiredMicStateRef.current = 'recording';
+        startRecorderCycle(stream);
 
         const waveformBuffer = new Uint8Array(analyser.frequencyBinCount);
         const timeDomainBuffer = new Uint8Array(analyser.fftSize);
@@ -502,17 +547,25 @@ export default function ThinkingSessionPage() {
     }
 
     function handleToggleMic() {
-        if (uiState !== 'active' || !mediaRecorderRef.current) return;
+        if (uiState !== 'active' || !mediaStreamRef.current) return;
         const recorder = mediaRecorderRef.current;
-        if (recorder.state === 'recording') {
-            recorder.pause();
+        if (micStatus === 'recording') {
+            desiredMicStateRef.current = 'paused';
             setMicStatus('paused');
+            if (recordingTimerRef.current) {
+                window.clearTimeout(recordingTimerRef.current);
+                recordingTimerRef.current = null;
+            }
+            if (recorder && recorder.state === 'recording') {
+                recorder.stop();
+            }
             return;
         }
-        if (recorder.state === 'paused') {
-            recorder.resume();
+        if (micStatus === 'paused') {
+            desiredMicStateRef.current = 'recording';
             resetFeatureStats();
             setMicStatus('recording');
+            startRecorderCycle(mediaStreamRef.current);
         }
     }
 
@@ -520,8 +573,13 @@ export default function ThinkingSessionPage() {
         if (!sessionIdRef.current) return;
         try {
             streamingEnabledRef.current = false;
+            desiredMicStateRef.current = 'idle';
+            if (recordingTimerRef.current) {
+                window.clearTimeout(recordingTimerRef.current);
+                recordingTimerRef.current = null;
+            }
             if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-                mediaRecorderRef.current.requestData();
+                mediaRecorderRef.current.stop();
             }
             cleanupAudio();
             setMicStatus('idle');
