@@ -1,214 +1,568 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Brain, Mic, Send, Clock, Play, CheckCircle2, ChevronRight, AlertCircle } from 'lucide-react';
-import Navbar from '../components/Navbar';
-import PageTransition from '../components/PageTransition';
+import React, { useEffect, useRef, useState } from 'react';
+import ProblemPanel from '../components/cognitive/ProblemPanel';
+import CognitiveIDE from '../components/cognitive/CognitiveIDE';
+import TimelinePanel from '../components/cognitive/TimelinePanel';
 
-const stages = [
-    { id: 'understand', name: 'Understand Problem' },
-    { id: 'plan', name: 'Plan Approach' },
-    { id: 'solve', name: 'Step-by-Step Solving' },
-    { id: 'explore', name: 'Explore Alternatives' },
-    { id: 'reflect', name: 'Reflect' }
-];
+const API_BASE_URL = 'http://127.0.0.1:8000';
+const WS_BASE_URL = 'ws://127.0.0.1:8000';
+const CHUNK_DURATION_MS = 4000;
+const ANALYSER_FFT_SIZE = 1024;
+const MIN_VOICE_THRESHOLD = 0.012;
+const NOISE_MULTIPLIER = 2.4;
 
-export default function ThinkingSessionPage() {
-    const navigate = useNavigate();
-    const [currentStageIdx, setCurrentStageIdx] = useState(0);
-    const [chatHistory, setChatHistory] = useState([
-        { role: 'ai', content: "Let's read the problem carefully. What is the main thing we are trying to find here?" }
-    ]);
-    const [inputValue, setInputValue] = useState('');
-    const [timeElapsed, setTimeElapsed] = useState(0);
-    const messagesEndRef = useRef(null);
+function formatTimer(totalSeconds) {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
 
-    const problem = "A train 120 meters long is running with a speed of 60 km/hr. In what time will it pass a man who is running at 6 km/hr in the direction opposite to that in which the train is going?";
-    const topic = localStorage.getItem('thinking_session_topic') || 'Math Problem';
+function createIdleWaveform() {
+    return Array.from({ length: 20 }, () => 10);
+}
 
-    useEffect(() => {
-        const timer = setInterval(() => {
-            setTimeElapsed(prev => prev + 1);
-        }, 1000);
-        return () => clearInterval(timer);
-    }, []);
+function normaliseCategory(category) {
+    if (["understanding", "parameter", "strategy", "delay", "deviation", "execution", "intervention", "signal", "system"].includes(category)) {
+        return category;
+    }
+    return 'signal';
+}
 
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [chatHistory]);
-
-    const formatTime = (seconds) => {
-        const m = Math.floor(seconds / 60);
-        const s = seconds % 60;
-        return `${m}:${s.toString().padStart(2, '0')}`;
+function timelineItemFromSocket(data) {
+    return {
+        id: data.event_id || `evt-${data.timestamp || data.timeLabel || Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        type: normaliseCategory(data.category || data.type),
+        title: data.message || 'Timeline update',
+        detail: data.detail || 'The cognitive runtime recorded a new observation.',
+        timeLabel: formatTimer(Math.round(data.timestamp || data.at_seconds || 0)),
     };
+}
 
-    const handleSend = () => {
-        if (!inputValue.trim()) return;
-
-        const newHistory = [...chatHistory, { role: 'user', content: inputValue }];
-        setChatHistory(newHistory);
-        setInputValue('');
-
-        // Mock AI Behavior
-        setTimeout(() => {
-            let aiResponse = "";
-            let advanceStage = false;
-
-            if (currentStageIdx === 0) {
-                if (inputValue.toLowerCase().includes('time') || inputValue.toLowerCase().includes('pass')) {
-                    aiResponse = "Great! We need to find the time. Now, let's move to planning. How should we approach relative speed when objects move in opposite directions?";
-                    advanceStage = true;
-                } else {
-                    aiResponse = "Close, but let's re-read the last sentence. Are we looking for speed, distance, or time?";
-                }
-            } else if (currentStageIdx === 1) {
-                if (inputValue.toLowerCase().includes('add') || inputValue.toLowerCase().includes('sum')) {
-                    aiResponse = "Exactly! We add the speeds. Let's calculate the relative speed and then solve for time.";
-                    advanceStage = true;
-                } else {
-                    aiResponse = "Think about two cars driving towards each other. Do they pass each other faster or slower? Should we add or subtract their speeds?";
-                }
-            } else if (currentStageIdx === 2) {
-                if (inputValue.toLowerCase().includes('66')) {
-                    aiResponse = "Wait, don't forget units! Before calculating time, the speed is in km/hr but distance is in meters. What should we do next?";
-                } else if (inputValue.toLowerCase().includes('convert') || inputValue.toLowerCase().includes('5/18')) {
-                    aiResponse = "Brilliant! You caught the unit difference. Go ahead and calculate the final time in seconds.";
-                } else if (inputValue.includes('6.54')) {
-                    aiResponse = "Perfect calculation! Now, are there any other ways to think about this problem, or is this the most efficient path?";
-                    advanceStage = true;
-                } else {
-                    aiResponse = "Let's work through the math. Relative speed = 60 + 6 km/hr. How do we convert that to m/s?";
-                }
-            } else if (currentStageIdx === 3) {
-                aiResponse = "Good thoughts. Finally, let's reflect. What was the trickiest part of this problem for you?";
-                advanceStage = true;
-            } else if (currentStageIdx === 4) {
-                // Record session stats
-                localStorage.setItem('thinking_session_time', timeElapsed);
-                navigate('/thinking-report');
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const result = reader.result;
+            if (typeof result !== 'string') {
+                reject(new Error('Unable to encode audio chunk.'));
                 return;
             }
+            const encoded = result.includes(',') ? result.split(',')[1] : result;
+            resolve(encoded);
+        };
+        reader.onerror = () => reject(reader.error || new Error('Unable to encode audio chunk.'));
+        reader.readAsDataURL(blob);
+    });
+}
 
-            setChatHistory([...newHistory, { role: 'ai', content: aiResponse }]);
-            if (advanceStage) {
-                setCurrentStageIdx(prev => Math.min(prev + 1, 4));
+function selectRecorderMimeType() {
+    const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+    ];
+
+    if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+        return '';
+    }
+
+    const supported = candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+    return supported || '';
+}
+
+export default function ThinkingSessionPage() {
+    const [uiState, setUiState] = useState('pre_session');
+    const [timer, setTimer] = useState(0);
+    const [micStatus, setMicStatus] = useState('idle');
+    const [statusText, setStatusText] = useState('Idle...');
+    const [sessionPhase, setSessionPhase] = useState('understanding');
+    const [lifecycleState, setLifecycleState] = useState('initializing');
+    const [waveform, setWaveform] = useState(() => createIdleWaveform());
+    const [problemText, setProblemText] = useState('The problem will appear here when the session starts.');
+    const [timelineEvents, setTimelineEvents] = useState([]);
+    const [sessionId, setSessionId] = useState(null);
+    const [runtimeNote, setRuntimeNote] = useState('');
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [isIntervening, setIsIntervening] = useState(false);
+
+    const wsRef = useRef(null);
+    const heartbeatRef = useRef(null);
+    const timerRef = useRef(0);
+    const sessionIdRef = useRef(null);
+    const sessionStartedAtRef = useRef(null);
+    const chunkIndexRef = useRef(0);
+    const mediaRecorderRef = useRef(null);
+    const mediaStreamRef = useRef(null);
+    const audioContextRef = useRef(null);
+    const analyserRef = useRef(null);
+    const animationFrameRef = useRef(null);
+    const featureStatsRef = useRef(null);
+    const interventionTimeoutRef = useRef(null);
+    const streamingEnabledRef = useRef(false);
+    const recorderMimeTypeRef = useRef('');
+
+    useEffect(() => {
+        timerRef.current = timer;
+    }, [timer]);
+
+    useEffect(() => {
+        sessionIdRef.current = sessionId;
+    }, [sessionId]);
+
+    useEffect(() => {
+        if (isAnalyzing) {
+            setStatusText('Analyzing...');
+            return;
+        }
+        if (isIntervening) {
+            setStatusText('Intervention...');
+            return;
+        }
+        if (uiState === 'completed') {
+            setStatusText('Idle...');
+            return;
+        }
+        if (uiState !== 'active') {
+            setStatusText('Idle...');
+            return;
+        }
+        setStatusText(micStatus === 'recording' ? 'Listening...' : 'Idle...');
+    }, [isAnalyzing, isIntervening, micStatus, uiState]);
+
+    useEffect(() => {
+        if (uiState !== 'active') return undefined;
+        const interval = window.setInterval(() => {
+            setTimer((current) => current + 1);
+        }, 1000);
+        return () => window.clearInterval(interval);
+    }, [uiState]);
+
+    useEffect(() => () => {
+        cleanupAudio();
+        cleanupSocket();
+        if (interventionTimeoutRef.current) {
+            window.clearTimeout(interventionTimeoutRef.current);
+        }
+    }, []);
+
+    function appendTimelineEvent(nextEvent) {
+        setTimelineEvents((current) => {
+            if (current.some((event) => event.id === nextEvent.id)) {
+                return current;
             }
-        }, 1200);
-    };
+            return [...current, nextEvent];
+        });
+    }
 
-    const guidedInputs = ["I think...", "Can we try the formula...", "I'm confused about...", "Let's draw it out."];
+    function resetFeatureStats() {
+        featureStatsRef.current = {
+            frameCount: 0,
+            voicedFrames: 0,
+            energyTotal: 0,
+            peakEnergy: 0,
+            currentSilenceSeconds: 0,
+            maxSilenceSeconds: 0,
+            leadingSilenceSeconds: 0,
+            trailingSilenceSeconds: 0,
+            startedSpeaking: false,
+            noiseFloor: MIN_VOICE_THRESHOLD / 2,
+            speechThreshold: MIN_VOICE_THRESHOLD,
+            lastFrameAt: performance.now(),
+        };
+    }
+
+    function consumeFeatureStats() {
+        const stats = featureStatsRef.current;
+        if (!stats || stats.frameCount === 0) {
+            resetFeatureStats();
+            return {
+                pause_before_seconds: 0,
+                speech_density: 0,
+                speech_energy: 0,
+                silence_ratio: 1,
+                token_density: 0,
+                extra: {
+                    peak_energy: 0,
+                    leading_silence_seconds: 0,
+                    trailing_silence_seconds: 0,
+                    noise_floor: 0,
+                    speech_threshold: 0,
+                    voiced_frames_ratio: 0,
+                },
+            };
+        }
+
+        const voicedRatio = stats.voicedFrames / stats.frameCount;
+        const payload = {
+            pause_before_seconds: Number(stats.leadingSilenceSeconds.toFixed(2)),
+            speech_density: Number(voicedRatio.toFixed(3)),
+            speech_energy: Number((stats.energyTotal / stats.frameCount).toFixed(3)),
+            silence_ratio: Number((1 - voicedRatio).toFixed(3)),
+            token_density: 0,
+            extra: {
+                peak_energy: Number(stats.peakEnergy.toFixed(3)),
+                leading_silence_seconds: Number(stats.leadingSilenceSeconds.toFixed(2)),
+                trailing_silence_seconds: Number(stats.trailingSilenceSeconds.toFixed(2)),
+                noise_floor: Number(stats.noiseFloor.toFixed(4)),
+                speech_threshold: Number(stats.speechThreshold.toFixed(4)),
+                voiced_frames_ratio: Number(voicedRatio.toFixed(3)),
+            },
+        };
+        resetFeatureStats();
+        return payload;
+    }
+
+    function cleanupSocket() {
+        if (heartbeatRef.current) {
+            window.clearInterval(heartbeatRef.current);
+            heartbeatRef.current = null;
+        }
+        if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+    }
+
+    function cleanupAudio() {
+        streamingEnabledRef.current = false;
+        recorderMimeTypeRef.current = '';
+        if (animationFrameRef.current) {
+            window.cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
+        }
+        if (mediaRecorderRef.current) {
+            const recorder = mediaRecorderRef.current;
+            if (recorder.state !== 'inactive') {
+                recorder.stop();
+            }
+            mediaRecorderRef.current = null;
+        }
+        if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+            mediaStreamRef.current = null;
+        }
+        if (audioContextRef.current) {
+            audioContextRef.current.close();
+            audioContextRef.current = null;
+        }
+        analyserRef.current = null;
+        setWaveform(createIdleWaveform());
+    }
+
+    function connectSocket(nextSessionId) {
+        cleanupSocket();
+        const socket = new WebSocket(`${WS_BASE_URL}/ws/session/${nextSessionId}`);
+        socket.onmessage = (message) => {
+            const payload = JSON.parse(message.data);
+            const { type, data } = payload;
+            if (type === 'session_snapshot') {
+                setLifecycleState(data.lifecycle_state || 'active');
+                setSessionPhase(data.phase || 'understanding');
+                setTimelineEvents((data.timeline || []).map((item) => timelineItemFromSocket({
+                    event_id: item.event_id,
+                    category: item.category,
+                    message: item.message,
+                    detail: item.payload?.detail,
+                    timestamp: item.at_seconds,
+                })));
+                return;
+            }
+            if (type === 'phase_change') {
+                setSessionPhase(data.phase || 'understanding');
+                setLifecycleState(data.lifecycle_state || 'active');
+                if (data.lifecycle_state === 'closed') {
+                    setUiState('completed');
+                    setMicStatus('idle');
+                }
+                return;
+            }
+            if (type === 'status_update') {
+                if (!isAnalyzing && !isIntervening) {
+                    setStatusText(data.status || 'Idle...');
+                }
+                return;
+            }
+            if (type === 'timeline_event') {
+                appendTimelineEvent(timelineItemFromSocket(data));
+                return;
+            }
+            if (type === 'intervention') {
+                setIsIntervening(true);
+                appendTimelineEvent(
+                    timelineItemFromSocket({
+                        event_id: `intervention-${data.timestamp}`,
+                        category: 'intervention',
+                        message: 'Intervention triggered',
+                        detail: data.message,
+                        timestamp: data.timestamp,
+                    }),
+                );
+                if (interventionTimeoutRef.current) {
+                    window.clearTimeout(interventionTimeoutRef.current);
+                }
+                interventionTimeoutRef.current = window.setTimeout(() => {
+                    setIsIntervening(false);
+                }, 1400);
+            }
+        };
+        socket.onopen = () => {
+            heartbeatRef.current = window.setInterval(() => {
+                if (socket.readyState === WebSocket.OPEN) {
+                    socket.send('ping');
+                }
+            }, 20000);
+        };
+        socket.onclose = () => {
+            if (heartbeatRef.current) {
+                window.clearInterval(heartbeatRef.current);
+                heartbeatRef.current = null;
+            }
+        };
+        wsRef.current = socket;
+    }
+
+    async function streamChunk(blob) {
+        if (!streamingEnabledRef.current || !sessionIdRef.current || !sessionStartedAtRef.current) return;
+        const chunkIndex = chunkIndexRef.current + 1;
+        chunkIndexRef.current = chunkIndex;
+        const endTime = (performance.now() - sessionStartedAtRef.current) / 1000;
+        const startTime = Math.max(0, endTime - CHUNK_DURATION_MS / 1000);
+        const audioPayload = await blobToBase64(blob);
+        const frontendFeatures = consumeFeatureStats();
+        frontendFeatures.extra = {
+            ...frontendFeatures.extra,
+            chunk_size_bytes: blob.size,
+            mime_type: blob.type || recorderMimeTypeRef.current || 'audio/webm',
+            chunk_duration_ms: CHUNK_DURATION_MS,
+        };
+
+        setIsAnalyzing(true);
+        try {
+            await fetch(`${API_BASE_URL}/stream_audio_chunk`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: sessionIdRef.current,
+                    chunk_id: `chunk_${chunkIndex}`,
+                    timestamp: {
+                        start_time: Number(startTime.toFixed(2)),
+                        end_time: Number(endTime.toFixed(2)),
+                    },
+                    audio_payload_b64: audioPayload,
+                    frontend_features: frontendFeatures,
+                    transcript_hint: null,
+                }),
+            });
+        } finally {
+            setIsAnalyzing(false);
+        }
+    }
+
+    async function initializeAudioRuntime() {
+        if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error('Microphone access is not supported in this browser.');
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: { ideal: 1 },
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+        });
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        const audioContext = new AudioContextCtor();
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = ANALYSER_FFT_SIZE;
+        analyser.smoothingTimeConstant = 0.72;
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+
+        mediaStreamRef.current = stream;
+        audioContextRef.current = audioContext;
+        analyserRef.current = analyser;
+        resetFeatureStats();
+        streamingEnabledRef.current = true;
+
+        const mimeType = selectRecorderMimeType();
+        const recorder = mimeType
+            ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 128000 })
+            : new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+        recorderMimeTypeRef.current = recorder.mimeType || mimeType;
+        recorder.ondataavailable = async (event) => {
+            if (!streamingEnabledRef.current || event.data.size === 0) return;
+            await streamChunk(event.data);
+        };
+        recorder.start(CHUNK_DURATION_MS);
+        mediaRecorderRef.current = recorder;
+
+        const waveformBuffer = new Uint8Array(analyser.frequencyBinCount);
+        const timeDomainBuffer = new Uint8Array(analyser.fftSize);
+
+        const draw = () => {
+            const activeAnalyser = analyserRef.current;
+            if (!activeAnalyser || !streamingEnabledRef.current) return;
+            activeAnalyser.getByteFrequencyData(waveformBuffer);
+            activeAnalyser.getByteTimeDomainData(timeDomainBuffer);
+
+            const bars = Array.from({ length: 20 }, (_, index) => {
+                const start = Math.floor((index * waveformBuffer.length) / 20);
+                const end = Math.floor(((index + 1) * waveformBuffer.length) / 20);
+                const slice = waveformBuffer.slice(start, end);
+                const average = slice.length === 0 ? 0 : slice.reduce((sum, value) => sum + value, 0) / slice.length;
+                return Math.max(8, Math.round((average / 255) * 100));
+            });
+            setWaveform(bars);
+
+            let rms = 0;
+            for (let index = 0; index < timeDomainBuffer.length; index += 1) {
+                const centered = (timeDomainBuffer[index] - 128) / 128;
+                rms += centered * centered;
+            }
+            rms = Math.sqrt(rms / timeDomainBuffer.length);
+
+            const now = performance.now();
+            const stats = featureStatsRef.current;
+            if (stats) {
+                const deltaSeconds = Math.min((now - stats.lastFrameAt) / 1000, 0.08);
+                stats.lastFrameAt = now;
+                stats.frameCount += 1;
+                stats.energyTotal += rms;
+                stats.peakEnergy = Math.max(stats.peakEnergy, rms);
+
+                const adaptiveNoiseFloor = Math.max(MIN_VOICE_THRESHOLD / 2, stats.noiseFloor);
+                const speechThreshold = Math.max(MIN_VOICE_THRESHOLD, adaptiveNoiseFloor * NOISE_MULTIPLIER);
+                stats.speechThreshold = speechThreshold;
+
+                const isVoiced = rms >= speechThreshold;
+                if (isVoiced) {
+                    stats.voicedFrames += 1;
+                    stats.startedSpeaking = true;
+                    stats.currentSilenceSeconds = 0;
+                    stats.trailingSilenceSeconds = 0;
+                } else {
+                    stats.noiseFloor = stats.noiseFloor * 0.92 + rms * 0.08;
+                    stats.currentSilenceSeconds += deltaSeconds;
+                    stats.maxSilenceSeconds = Math.max(stats.maxSilenceSeconds, stats.currentSilenceSeconds);
+                    if (!stats.startedSpeaking) {
+                        stats.leadingSilenceSeconds += deltaSeconds;
+                    } else {
+                        stats.trailingSilenceSeconds = stats.currentSilenceSeconds;
+                    }
+                }
+            }
+
+            animationFrameRef.current = window.requestAnimationFrame(draw);
+        };
+
+        animationFrameRef.current = window.requestAnimationFrame(draw);
+    }
+
+    async function handleStartThinking() {
+        setRuntimeNote('');
+        setUiState('loading');
+        setTimer(0);
+        setTimelineEvents([]);
+        setMicStatus('idle');
+        setLifecycleState('initializing');
+        setSessionPhase('understanding');
+        setSessionId(null);
+        setIsAnalyzing(false);
+        setIsIntervening(false);
+        cleanupAudio();
+        cleanupSocket();
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/start_session`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
+            if (!response.ok) {
+                throw new Error('Unable to start the session.');
+            }
+            const session = await response.json();
+            setSessionId(session.session_id);
+            sessionIdRef.current = session.session_id;
+            setProblemText(session.problem_payload?.raw_text || 'Problem unavailable.');
+            setSessionPhase(session.initial_state?.phase || 'understanding');
+            setLifecycleState(session.initial_state?.lifecycle_state || 'active');
+            connectSocket(session.session_id);
+            sessionStartedAtRef.current = performance.now();
+            chunkIndexRef.current = 0;
+            setUiState('active');
+            await initializeAudioRuntime();
+            setMicStatus('recording');
+        } catch (error) {
+            cleanupAudio();
+            cleanupSocket();
+            setUiState('pre_session');
+            setRuntimeNote(error instanceof Error ? error.message : 'Unable to initialize the runtime.');
+        }
+    }
+
+    function handleToggleMic() {
+        if (uiState !== 'active' || !mediaRecorderRef.current) return;
+        const recorder = mediaRecorderRef.current;
+        if (recorder.state === 'recording') {
+            recorder.pause();
+            setMicStatus('paused');
+            return;
+        }
+        if (recorder.state === 'paused') {
+            recorder.resume();
+            resetFeatureStats();
+            setMicStatus('recording');
+        }
+    }
+
+    async function handleEndSession() {
+        if (!sessionIdRef.current) return;
+        try {
+            streamingEnabledRef.current = false;
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                mediaRecorderRef.current.requestData();
+            }
+            cleanupAudio();
+            setMicStatus('idle');
+            await fetch(`${API_BASE_URL}/end_session`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: sessionIdRef.current,
+                    final_timestamps: {
+                        start_time: 0,
+                        end_time: timerRef.current,
+                    },
+                }),
+            });
+            setLifecycleState('closed');
+            setUiState('completed');
+        } catch {
+            setRuntimeNote('Unable to close the session cleanly.');
+        } finally {
+            cleanupSocket();
+        }
+    }
 
     return (
-        <div className="min-h-screen bg-gray-50 flex flex-col">
-            <Navbar />
-            
-            <div className="flex-1 flex gap-4 max-w-7xl mx-auto w-full p-4 h-[calc(100vh-80px)]">
-                {/* Insights Panel (Left) */}
-                <div className="w-64 bg-white rounded-2xl shadow-sm border border-gray-200 p-5 flex flex-col hidden md:flex">
-                    <h3 className="font-bold text-gray-800 mb-6 flex items-center gap-2">
-                        <Brain className="text-blue-600" /> Session Progress
-                    </h3>
-                    
-                    <div className="flex-1 space-y-6 relative">
-                        {/* Progress Line */}
-                        <div className="absolute left-[11px] top-2 bottom-6 w-0.5 bg-gray-100 z-0"></div>
-
-                        {stages.map((stage, idx) => (
-                            <div key={stage.id} className="relative z-10 flex items-start gap-4">
-                                <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 transition-colors ${idx < currentStageIdx ? 'bg-green-100 text-green-600' : idx === currentStageIdx ? 'bg-blue-600 text-white ring-4 ring-blue-50' : 'bg-gray-100 text-gray-400'}`}>
-                                    {idx < currentStageIdx ? <CheckCircle2 size={14} /> : (idx + 1)}
-                                </div>
-                                <div className={idx === currentStageIdx ? 'text-blue-700 font-semibold text-sm' : idx < currentStageIdx ? 'text-gray-900 font-medium text-sm' : 'text-gray-400 text-sm'}>
-                                    {stage.name}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-
-                    <div className="mt-auto pt-4 border-t border-gray-100">
-                        <div className="flex items-center justify-between text-gray-600">
-                            <span className="flex items-center gap-2 text-sm"><Clock size={16} /> Elapsed</span>
-                            <span className="font-mono font-bold">{formatTime(timeElapsed)}</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="flex-1 flex flex-col gap-4">
-                    {/* Question Panel */}
-                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 flex-shrink-0">
-                        <div className="flex items-center justify-between mb-4">
-                            <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-bold uppercase tracking-wider">{topic}</span>
-                            <span className="text-gray-500 text-sm flex items-center gap-1"><AlertCircle size={14}/> Read carefully</span>
-                        </div>
-                        <p className="text-xl text-gray-900 leading-relaxed font-medium">
-                            {problem}
-                        </p>
-                    </div>
-
-                    {/* Chat/Thinking Panel */}
-                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 flex-1 flex flex-col overflow-hidden relative">
-                        <div className="absolute top-0 w-full bg-gradient-to-b from-white to-transparent h-6 z-10" />
-                        
-                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                            {chatHistory.map((msg, idx) => (
-                                <motion.div 
-                                    initial={{ opacity: 0, y: 10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    key={idx} 
-                                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                                >
-                                    <div className={`max-w-[80%] rounded-2xl px-5 py-3.5 ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-none shadow-md' : 'bg-gray-100 text-gray-800 rounded-bl-none border border-gray-200'}`}>
-                                        <p className="leading-relaxed">{msg.content}</p>
-                                    </div>
-                                </motion.div>
-                            ))}
-                            <div ref={messagesEndRef} />
-                        </div>
-
-                        {/* Input Area */}
-                        <div className="p-4 bg-gray-50 border-t border-gray-200">
-                            <div className="flex gap-2 mb-3 overflow-x-auto pb-1" style={{scrollbarWidth: 'none', msOverflowStyle: 'none'}}>
-                                {guidedInputs.map(gi => (
-                                    <button 
-                                        key={gi} 
-                                        onClick={() => setInputValue(gi)}
-                                        className="whitespace-nowrap px-4 py-1.5 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-600 hover:text-blue-600 hover:border-blue-300 transition-colors shadow-sm"
-                                    >
-                                        {gi}
-                                    </button>
-                                ))}
-                            </div>
-                            <div className="flex items-end gap-3">
-                                <button className="p-3 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors bg-white border border-gray-200 shadow-sm flex-shrink-0">
-                                    <Mic size={20} />
-                                </button>
-                                <div className="flex-1 relative">
-                                    <textarea
-                                        value={inputValue}
-                                        onChange={(e) => setInputValue(e.target.value)}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && !e.shiftKey) {
-                                                e.preventDefault();
-                                                handleSend();
-                                            }
-                                        }}
-                                        placeholder="Type your thinking process here..."
-                                        className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none shadow-sm"
-                                        rows={2}
-                                    />
-                                </div>
-                                <button 
-                                    onClick={handleSend}
-                                    disabled={!inputValue.trim()}
-                                    className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                                >
-                                    <Send size={20} className="ml-0.5" />
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+        <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.16),transparent_22%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_42%,#edf3f7_100%)] px-3 py-3 text-slate-950 sm:px-4 lg:px-5">
+            <div className="mx-auto grid max-w-[1720px] gap-3 xl:h-[calc(100vh-1.5rem)] xl:grid-cols-[1.04fr_1.28fr_0.98fr]">
+                <ProblemPanel problemText={problemText} />
+                <CognitiveIDE
+                    uiState={uiState}
+                    timer={timer}
+                    micStatus={micStatus}
+                    statusText={statusText}
+                    waveform={waveform}
+                    sessionPhase={sessionPhase}
+                    lifecycleState={lifecycleState}
+                    runtimeNote={runtimeNote}
+                    onStart={handleStartThinking}
+                    onToggleMic={handleToggleMic}
+                    onEndSession={handleEndSession}
+                />
+                <TimelinePanel events={timelineEvents} />
             </div>
         </div>
     );

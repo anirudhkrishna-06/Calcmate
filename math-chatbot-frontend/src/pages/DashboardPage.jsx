@@ -27,12 +27,12 @@ export default function DashboardPage() {
 
     const cards = [
         {
-            title: 'Live Thinking Session',
-            desc: 'Improve how you think, not just solve. Step-by-step guided math sessions.',
+            title: 'Thinking IDE',
+            desc: 'Enter the audio-first cognitive runtime for real-time thinking traces.',
             icon: Lightbulb,
             color: 'blue',
-            path: '/thinking-setup',
-            badge: 'New',
+            path: '/thinking-session',
+            badge: 'Phase 2',
         },
         {
             title: 'Ask a Question',
@@ -70,7 +70,6 @@ export default function DashboardPage() {
 
     const colorMap = {
         blue: {
-            bg: 'bg-blue-50',
             iconBg: 'bg-blue-100',
             iconText: 'text-blue-600',
             border: 'hover:border-blue-200',
@@ -78,15 +77,13 @@ export default function DashboardPage() {
         },
     };
 
-    // Get recent activity from localStorage
     const getRecentActivity = () => {
         try {
             const chatSessions = JSON.parse(localStorage.getItem('mathmend_chat_sessions') || '[]');
-            const recent = chatSessions
+            return chatSessions
                 .filter((s) => s.messages && s.messages.length > 0)
                 .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
                 .slice(0, 3);
-            return recent;
         } catch {
             return [];
         }
@@ -99,7 +96,6 @@ export default function DashboardPage() {
             <Navbar />
             <PageTransition>
                 <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-                    {/* Welcome Header */}
                     <div className="mb-10">
                         <motion.h1
                             className="text-3xl font-bold text-gray-900"
@@ -115,11 +111,10 @@ export default function DashboardPage() {
                             animate={{ opacity: 1 }}
                             transition={{ duration: 0.4, delay: 0.1 }}
                         >
-                            What would you like to work on today?
+                            Choose the environment you want to open.
                         </motion.p>
                     </div>
 
-                    {/* Feature Cards Grid */}
                     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-12">
                         {cards.map((card, idx) => {
                             const Icon = card.icon;
@@ -139,17 +134,11 @@ export default function DashboardPage() {
                                             {card.badge}
                                         </span>
                                     )}
-                                    <div
-                                        className={`w-11 h-11 ${colors.iconBg} rounded-xl flex items-center justify-center mb-4 group-hover:scale-105 transition-transform`}
-                                    >
+                                    <div className={`w-11 h-11 ${colors.iconBg} rounded-xl flex items-center justify-center mb-4 group-hover:scale-105 transition-transform`}>
                                         <Icon size={20} className={colors.iconText} />
                                     </div>
-                                    <h3 className="text-base font-semibold text-gray-900 mb-1.5">
-                                        {card.title}
-                                    </h3>
-                                    <p className="text-sm text-gray-500 leading-relaxed mb-4">
-                                        {card.desc}
-                                    </p>
+                                    <h3 className="text-base font-semibold text-gray-900 mb-1.5">{card.title}</h3>
+                                    <p className="text-sm text-gray-500 leading-relaxed mb-4">{card.desc}</p>
                                     <div className="flex items-center text-sm text-blue-600 font-medium group-hover:gap-2 gap-1 transition-all">
                                         Open
                                         <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
@@ -159,16 +148,13 @@ export default function DashboardPage() {
                         })}
                     </div>
 
-                    {/* Recent Activity */}
                     {recentActivity.length > 0 && (
                         <motion.div
                             initial={{ opacity: 0, y: 10 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ duration: 0.4, delay: 0.5 }}
                         >
-                            <h2 className="text-lg font-semibold text-gray-900 mb-4">
-                                Recent Conversations
-                            </h2>
+                            <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Conversations</h2>
                             <div className="bg-white rounded-2xl border border-gray-100 divide-y divide-gray-50">
                                 {recentActivity.map((session) => (
                                     <button
@@ -180,9 +166,7 @@ export default function DashboardPage() {
                                             <MessageSquare size={16} className="text-blue-600" />
                                         </div>
                                         <div className="flex-1 min-w-0">
-                                            <p className="text-sm font-medium text-gray-900 truncate">
-                                                {session.title || 'Untitled conversation'}
-                                            </p>
+                                            <p className="text-sm font-medium text-gray-900 truncate">{session.title || 'Untitled conversation'}</p>
                                             <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
                                                 <Clock size={10} />
                                                 {new Date(session.updatedAt).toLocaleDateString()}
