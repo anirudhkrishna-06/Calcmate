@@ -1,41 +1,15 @@
 import React from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-    BrainCircuit,
-    Camera,
     CheckCircle2,
+    Clock3,
     Loader2,
-    Mic,
-    MicOff,
-    PauseCircle,
-    Play,
     Radio,
     Square,
+    Upload,
+    Wand2,
     XCircle,
 } from 'lucide-react';
-
-const stateCopy = {
-    pre_session: {
-        eyebrow: 'Cognitive Runtime',
-        title: 'Start Thinking',
-        body: 'Think aloud. The system will follow your reasoning.',
-    },
-    loading: {
-        eyebrow: 'Engine Startup',
-        title: 'Initializing cognitive engine...',
-        body: 'Preparing session state, problem context, and real-time tracing.',
-    },
-    active: {
-        eyebrow: 'Live Session',
-        title: 'Thinking in progress',
-        body: 'Speak naturally. The engine is tracing how your reasoning evolves over time.',
-    },
-    completed: {
-        eyebrow: 'Session Closed',
-        title: 'Thinking session complete',
-        body: 'Upload your answer to validate, or view your session report.',
-    },
-};
 
 function formatTimer(totalSeconds) {
     const minutes = Math.floor(totalSeconds / 60);
@@ -43,73 +17,129 @@ function formatTimer(totalSeconds) {
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-export default function CognitiveIDE({
-    uiState,
-    timer,
-    micStatus,
-    statusText,
-    waveform,
-    sessionPhase,
-    lifecycleState,
-    runtimeNote,
-    interventionMessage,
-    onStart,
-    onToggleMic,
-    onEndSession,
-    onUploadAnswer,
-    answerResult,
-    isValidating,
-}) {
-    const copy = stateCopy[uiState];
-    const isLoading = uiState === 'loading';
-    const isActive = uiState === 'active';
-    const fileInputRef = React.useRef(null);
-
-    const micButtonLabel =
-        micStatus === 'recording' ? 'Pause Listening' : micStatus === 'paused' ? 'Resume Listening' : 'Activate Microphone';
-
-    const MicIcon = micStatus === 'recording' ? PauseCircle : micStatus === 'paused' ? Play : Mic;
-
-    const handleFileSelect = (e) => {
-        const file = e.target.files?.[0];
-        if (file && onUploadAnswer) {
-            onUploadAnswer(file);
-        }
-        if (fileInputRef.current) fileInputRef.current.value = '';
+function MetricTile({ label, value, tone = 'slate' }) {
+    const toneClasses = {
+        slate: 'border-white/10 bg-white/6 text-slate-200',
+        amber: 'border-amber-300/20 bg-amber-300/10 text-amber-100',
+        emerald: 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100',
     };
 
     return (
-        <section className="relative overflow-hidden rounded-[32px] border border-slate-900/10 bg-[radial-gradient(circle_at_top,rgba(244,63,94,0.08),transparent_34%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(15,23,42,0.93))] p-6 text-white shadow-[0_30px_100px_rgba(15,23,42,0.35)] xl:h-[calc(100vh-3rem)]">
-            <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(148,163,184,0.08),transparent_35%,rgba(250,204,21,0.08)_100%)]" />
+        <div className={`rounded-[22px] border px-4 py-4 shadow-[0_18px_45px_rgba(15,23,42,0.2)] ${toneClasses[tone] || toneClasses.slate}`}>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.26em] text-current/70">{label}</p>
+            <div className="mt-2 font-mono text-[1.8rem] tracking-[0.16em]">{value}</div>
+        </div>
+    );
+}
+
+function OrbitalLoader({ isValidating }) {
+    return (
+        <div className="relative mx-auto h-28 w-28">
+            <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ repeat: Infinity, duration: isValidating ? 1.2 : 3.8, ease: 'linear' }}
+                className="absolute inset-0 rounded-full border border-dashed border-white/20"
+            />
+            <motion.div
+                animate={{ scale: [1, 1.04, 1], opacity: [0.65, 1, 0.65] }}
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="absolute inset-[14px] rounded-full bg-gradient-to-br from-amber-300/35 via-rose-300/20 to-sky-300/20 blur-xl"
+            />
+            <div className="absolute inset-[22px] flex items-center justify-center rounded-full border border-white/12 bg-slate-950/72">
+                {isValidating ? <Loader2 className="animate-spin text-amber-200" size={24} /> : <Upload className="text-amber-200" size={24} />}
+            </div>
+        </div>
+    );
+}
+
+function ThinkingPulse({ active = false }) {
+    return (
+        <div className="relative mx-auto h-24 w-24">
+            <motion.div
+                animate={{
+                    scale: active ? [1, 1.08, 1] : [1, 1.03, 1],
+                    opacity: [0.35, 0.7, 0.35],
+                }}
+                transition={{ repeat: Infinity, duration: active ? 1.8 : 2.8, ease: 'easeInOut' }}
+                className="absolute inset-0 rounded-full bg-gradient-to-br from-amber-300/45 via-rose-300/25 to-sky-300/25 blur-xl"
+            />
+            <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ repeat: Infinity, duration: active ? 5.5 : 9, ease: 'linear' }}
+                className="absolute inset-0 rounded-full border border-dashed border-white/20"
+            />
+            <motion.div
+                animate={{ rotate: -360 }}
+                transition={{ repeat: Infinity, duration: active ? 7 : 12, ease: 'linear' }}
+                className="absolute inset-[10px] rounded-full border border-white/12"
+            />
+            <div className="absolute inset-[20px] rounded-full border border-white/12 bg-slate-950/72" />
+        </div>
+    );
+}
+
+export default function CognitiveIDE({
+    uiStage,
+    thinkingTimer,
+    effectiveSolvingTimer,
+    uploadGraceUsed,
+    waveform,
+    runtimeNote,
+    answerResult,
+    isValidating,
+    isEndingSession,
+    onStartThinking,
+    onStartSolving,
+    onEndSession,
+    onUploadAnswer,
+    onNextQuestion,
+}) {
+    const fileInputRef = React.useRef(null);
+
+    const handleFileSelect = (event) => {
+        const file = event.target.files?.[0];
+        if (file && onUploadAnswer) {
+            onUploadAnswer(file);
+        }
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
+    };
+
+    return (
+        <section className="relative overflow-hidden rounded-[26px] border border-slate-900/10 bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.1),transparent_26%),linear-gradient(180deg,rgba(15,23,42,0.99),rgba(15,23,42,0.95))] p-4 text-white shadow-[0_26px_80px_rgba(15,23,42,0.3)] xl:min-h-[620px]">
+            <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(148,163,184,0.08),transparent_34%,rgba(251,191,36,0.08)_100%)]" />
             <div className="relative flex h-full flex-col">
-                <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
-                    <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-slate-300">{copy.eyebrow}</p>
-                        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">{copy.title}</h1>
-                    </div>
-                    <div className="rounded-full border border-white/12 bg-white/6 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-200">
-                        {sessionPhase.replace('_', ' ')}
-                    </div>
+                <div className="mb-3 border-b border-white/10 pb-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300">Math Session</p>
+                    <h2 className="mt-2 text-[1.55rem] font-semibold tracking-tight text-white">Enter Thinking Session</h2>
                 </div>
 
-                <div className="flex flex-1 flex-col items-center justify-center text-center">
+                <div className="grid gap-3 sm:grid-cols-2">
+                    <MetricTile label="Thinking Time" value={formatTimer(thinkingTimer)} tone="amber" />
+                    <MetricTile label="Solving Time" value={formatTimer(effectiveSolvingTimer)} tone={uiStage === 'solving' || uiStage === 'question_done' ? 'emerald' : 'slate'} />
+                </div>
+
+                <div className="mt-4 flex flex-1 flex-col justify-center rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] px-5 py-5">
                     <AnimatePresence mode="wait">
-                        {uiState === 'pre_session' && (
+                        {uiStage === 'pre_session' && (
                             <motion.div
                                 key="pre"
-                                initial={{ opacity: 0, y: 18 }}
+                                initial={{ opacity: 0, y: 12 }}
                                 animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -18 }}
-                                className="w-full max-w-xl"
+                                exit={{ opacity: 0, y: -12 }}
+                                className="flex h-full flex-col items-center justify-center gap-5 text-center"
                             >
-                                <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-[28px] border border-white/12 bg-white/6 shadow-[0_20px_50px_rgba(8,15,34,0.32)]">
-                                    <BrainCircuit size={40} className="text-amber-300" />
+                                <div className="relative">
+                                    <ThinkingPulse />
+                                    <div className="absolute inset-0 flex items-center justify-center">
+                                        <Radio className="text-amber-200" size={24} />
+                                    </div>
                                 </div>
-                                <p className="mx-auto mt-6 max-w-md text-base leading-7 text-slate-300">{copy.body}</p>
-                                {runtimeNote ? <p className="mx-auto mt-4 max-w-md text-sm leading-7 text-amber-200">{runtimeNote}</p> : null}
+                                {runtimeNote ? <p className="mt-5 max-w-md text-sm text-amber-200">{runtimeNote}</p> : null}
                                 <button
-                                    onClick={onStart}
-                                    className="mt-10 inline-flex items-center gap-3 rounded-full bg-amber-300 px-8 py-4 text-sm font-semibold uppercase tracking-[0.26em] text-slate-950 transition hover:bg-amber-200"
+                                    onClick={onStartThinking}
+                                    className="inline-flex items-center gap-3 rounded-full bg-amber-300 px-8 py-3.5 text-sm font-semibold uppercase tracking-[0.22em] text-slate-950 transition hover:bg-amber-200"
                                 >
                                     <Radio size={18} />
                                     Start Thinking
@@ -117,194 +147,143 @@ export default function CognitiveIDE({
                             </motion.div>
                         )}
 
-                        {uiState === 'active' && (
+                        {uiStage === 'loading' && (
                             <motion.div
-                                key="active"
-                                initial={{ opacity: 0, y: 18 }}
+                                key="loading"
+                                initial={{ opacity: 0, y: 12 }}
                                 animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -18 }}
-                                className="flex w-full flex-1 flex-col items-center justify-center"
+                                exit={{ opacity: 0, y: -12 }}
+                                className="flex h-full flex-col items-center justify-center text-center"
                             >
-                                <div className="rounded-full border border-white/12 bg-white/6 px-6 py-3 font-mono text-4xl tracking-[0.22em] text-white shadow-[0_20px_60px_rgba(15,23,42,0.3)] sm:text-5xl">
-                                    {formatTimer(timer)}
-                                </div>
-
-                                <div className="mt-10 flex h-28 w-full max-w-md items-end justify-center gap-2 rounded-[28px] border border-white/8 bg-white/5 px-6 py-8 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
-                                    {waveform.map((level, index) => (
-                                        <motion.span
-                                            key={index}
-                                            animate={{ height: `${level}%`, opacity: level > 12 ? 1 : 0.35 }}
-                                            transition={{ duration: 0.18, ease: 'easeOut' }}
-                                            className="w-2 rounded-full bg-gradient-to-t from-amber-300 via-rose-300 to-sky-200"
-                                            style={{ minHeight: '12px' }}
-                                        />
-                                    ))}
-                                </div>
-
-                                <div className="mt-8 rounded-full border border-white/10 bg-white/6 px-5 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-300">
-                                    {statusText}
-                                </div>
-
-                                <button
-                                    onClick={onToggleMic}
-                                    className={`mt-10 inline-flex h-20 w-20 items-center justify-center rounded-full border text-white transition ${
-                                        micStatus === 'recording'
-                                            ? 'border-rose-300/70 bg-rose-400/16 shadow-[0_0_0_12px_rgba(251,113,133,0.12)]'
-                                            : micStatus === 'paused'
-                                              ? 'border-sky-300/50 bg-sky-300/14 shadow-[0_0_0_12px_rgba(125,211,252,0.1)]'
-                                              : 'border-white/16 bg-white/10'
-                                    }`}
-                                    aria-label={micButtonLabel}
-                                >
-                                    <MicIcon size={28} />
-                                </button>
-
-                                <p className="mt-5 max-w-md text-sm leading-7 text-slate-300">{copy.body}</p>
-                                <p className="mt-4 text-[11px] font-semibold uppercase tracking-[0.26em] text-slate-400">{micButtonLabel}</p>
-                                <button
-                                    onClick={onEndSession}
-                                    className="mt-8 inline-flex items-center gap-2 rounded-full border border-white/14 bg-white/8 px-5 py-3 text-xs font-semibold uppercase tracking-[0.24em] text-slate-200 transition hover:bg-white/12"
-                                >
-                                    <Square size={14} />
-                                    End Session
-                                </button>
+                                <OrbitalLoader isValidating />
                             </motion.div>
                         )}
 
-                        {uiState === 'completed' && (
+                        {uiStage === 'thinking' && (
                             <motion.div
-                                key="completed"
-                                initial={{ opacity: 0, y: 18 }}
+                                key="thinking"
+                                initial={{ opacity: 0, y: 12 }}
                                 animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -18 }}
-                                className="w-full max-w-xl"
+                                exit={{ opacity: 0, y: -12 }}
+                                className="flex h-full flex-col items-center justify-center gap-5"
                             >
-                                <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-[28px] border border-emerald-300/20 bg-emerald-300/10 shadow-[0_20px_50px_rgba(8,15,34,0.32)]">
-                                    <BrainCircuit size={40} className="text-emerald-300" />
+                                <div className="relative">
+                                    <ThinkingPulse active />
                                 </div>
-                                <p className="mx-auto mt-6 max-w-md text-base leading-7 text-slate-300">{copy.body}</p>
+                                <div className="w-full max-w-xl rounded-[24px] border border-white/8 bg-slate-950/24 px-5 py-5">
+                                    <div className="flex h-28 items-end justify-center gap-2 rounded-[20px] border border-white/8 bg-white/5 px-5 py-6">
+                                        {waveform.map((level, index) => (
+                                            <motion.span
+                                                key={index}
+                                                animate={{ height: `${level}%`, opacity: level > 12 ? 1 : 0.28 }}
+                                                transition={{ duration: 0.18, ease: 'easeOut' }}
+                                                className="w-2 rounded-full bg-gradient-to-t from-amber-300 via-rose-300 to-sky-200"
+                                                style={{ minHeight: '12px' }}
+                                            />
+                                        ))}
+                                    </div>
+                                </div>
 
-                                {/* Answer Upload Section */}
-                                <div className="mt-8">
-                                    <input
-                                        type="file"
-                                        ref={fileInputRef}
-                                        onChange={handleFileSelect}
-                                        accept="image/*"
-                                        className="hidden"
-                                    />
-                                    {!answerResult && (
-                                        <button
-                                            onClick={() => fileInputRef.current?.click()}
-                                            disabled={isValidating}
-                                            className="inline-flex items-center gap-3 rounded-full border border-amber-300/40 bg-amber-300/10 px-6 py-3 text-sm font-semibold uppercase tracking-[0.22em] text-amber-200 transition hover:bg-amber-300/20 disabled:opacity-50"
-                                        >
-                                            {isValidating ? (
-                                                <>
-                                                    <Loader2 size={18} className="animate-spin" />
-                                                    Validating...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <Camera size={18} />
-                                                    Upload Answer
-                                                </>
-                                            )}
-                                        </button>
-                                    )}
+                                <div className="flex flex-wrap items-center justify-center gap-3">
+                                    <button
+                                        onClick={onStartSolving}
+                                        className="inline-flex items-center gap-3 rounded-full bg-emerald-300 px-8 py-3.5 text-sm font-semibold uppercase tracking-[0.22em] text-slate-950 transition hover:bg-emerald-200"
+                                    >
+                                        <Clock3 size={18} />
+                                        Start Solving
+                                    </button>
+                                    <button
+                                        onClick={onEndSession}
+                                        disabled={isEndingSession}
+                                        className="inline-flex items-center gap-2 rounded-full border border-white/14 bg-white/8 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/12 disabled:opacity-50"
+                                    >
+                                        <Square size={14} />
+                                        End Session
+                                    </button>
+                                </div>
+                            </motion.div>
+                        )}
 
-                                    {/* Answer Result */}
-                                    {answerResult && (
-                                        <motion.div
-                                            initial={{ opacity: 0, scale: 0.9 }}
-                                            animate={{ opacity: 1, scale: 1 }}
-                                            className={`mt-4 mx-auto max-w-sm rounded-2xl border p-5 ${
-                                                answerResult.correct
-                                                    ? 'border-emerald-300/30 bg-emerald-300/10'
-                                                    : 'border-rose-300/30 bg-rose-300/10'
-                                            }`}
-                                        >
-                                            <div className="flex items-center gap-3 justify-center">
-                                                {answerResult.correct ? (
-                                                    <CheckCircle2 size={28} className="text-emerald-300" />
-                                                ) : (
-                                                    <XCircle size={28} className="text-rose-300" />
-                                                )}
-                                                <span className={`text-lg font-bold ${answerResult.correct ? 'text-emerald-200' : 'text-rose-200'}`}>
-                                                    {answerResult.correct ? 'Correct!' : 'Incorrect'}
-                                                </span>
-                                            </div>
-                                            {answerResult.extracted_answer && (
-                                                <p className="mt-3 text-sm text-slate-300">
-                                                    Your answer: <span className="font-mono text-white">{answerResult.extracted_answer}</span>
-                                                </p>
-                                            )}
-                                            {answerResult.expected_answer && !answerResult.correct && (
-                                                <p className="mt-1 text-sm text-slate-300">
-                                                    Expected: <span className="font-mono text-white">{answerResult.expected_answer}</span>
-                                                </p>
-                                            )}
-                                        </motion.div>
-                                    )}
+                        {uiStage === 'solving' && (
+                            <motion.div
+                                key="solving"
+                                initial={{ opacity: 0, y: 12 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -12 }}
+                                className="flex h-full flex-col items-center justify-center"
+                            >
+                                <OrbitalLoader isValidating={isValidating} />
+                                <input
+                                    type="file"
+                                    ref={fileInputRef}
+                                    onChange={handleFileSelect}
+                                    accept="image/*"
+                                    className="hidden"
+                                />
+                                <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                                    <button
+                                        onClick={() => fileInputRef.current?.click()}
+                                        disabled={isValidating || isEndingSession}
+                                        className="inline-flex items-center gap-3 rounded-full bg-amber-300 px-8 py-3.5 text-sm font-semibold uppercase tracking-[0.22em] text-slate-950 transition hover:bg-amber-200 disabled:opacity-50"
+                                    >
+                                        {isValidating ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+                                        {isValidating ? 'Checking' : 'Upload Answer'}
+                                    </button>
+                                    <button
+                                        onClick={onEndSession}
+                                        disabled={isEndingSession}
+                                        className="inline-flex items-center gap-2 rounded-full border border-white/14 bg-white/8 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/12 disabled:opacity-50"
+                                    >
+                                        <Square size={14} />
+                                        End Session
+                                    </button>
+                                </div>
+                            </motion.div>
+                        )}
+
+                        {uiStage === 'question_done' && (
+                            <motion.div
+                                key="question_done"
+                                initial={{ opacity: 0, y: 12 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -12 }}
+                                className="flex h-full flex-col items-center justify-center text-center"
+                            >
+                                <div className={`flex h-20 w-20 items-center justify-center rounded-[24px] border ${
+                                    answerResult?.correct ? 'border-emerald-300/20 bg-emerald-300/10' : 'border-rose-300/20 bg-rose-300/10'
+                                }`}>
+                                    {answerResult?.correct ? <CheckCircle2 className="text-emerald-300" size={34} /> : <XCircle className="text-rose-300" size={34} />}
+                                </div>
+                                <div className="mt-5 w-full max-w-xl rounded-[24px] border border-white/10 bg-white/6 p-4 text-left">
+                                    <p className={`text-base font-bold ${answerResult?.correct ? 'text-emerald-200' : 'text-rose-200'}`}>
+                                        {answerResult?.correct ? 'Correct' : 'Wrong'}
+                                    </p>
+                                    <p className="mt-2 text-sm text-slate-200">Your answer: {answerResult?.extracted_answer || 'N/A'}</p>
+                                    {!answerResult?.correct ? <p className="mt-1 text-sm text-slate-200">Expected: {answerResult?.expected_answer || 'N/A'}</p> : null}
+                                    {answerResult?.explanation ? <p className="mt-3 text-xs leading-6 text-slate-300">{answerResult.explanation}</p> : null}
+                                    <p className="mt-2 text-xs leading-6 text-slate-400">Upload grace used: {formatTimer(uploadGraceUsed)}</p>
+                                </div>
+                                <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                                    <button
+                                        onClick={onNextQuestion}
+                                        className="inline-flex items-center gap-3 rounded-full bg-amber-300 px-8 py-3.5 text-sm font-semibold uppercase tracking-[0.22em] text-slate-950 transition hover:bg-amber-200"
+                                    >
+                                        <Wand2 size={18} />
+                                        Next Question
+                                    </button>
+                                    <button
+                                        onClick={onEndSession}
+                                        disabled={isEndingSession}
+                                        className="inline-flex items-center gap-2 rounded-full border border-white/14 bg-white/8 px-5 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/12 disabled:opacity-50"
+                                    >
+                                        <Square size={14} />
+                                        End Session
+                                    </button>
                                 </div>
                             </motion.div>
                         )}
                     </AnimatePresence>
                 </div>
-            </div>
-
-            {/* Loading Overlay */}
-            <AnimatePresence>
-                {isLoading && (
-                    <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/74 backdrop-blur-sm"
-                    >
-                        <div className="flex max-w-sm flex-col items-center text-center">
-                            <div className="flex h-20 w-20 items-center justify-center rounded-[24px] border border-white/10 bg-white/6">
-                                <Loader2 size={34} className="animate-spin text-amber-300" />
-                            </div>
-                            <h2 className="mt-6 text-2xl font-semibold text-white">Initializing cognitive engine...</h2>
-                            <p className="mt-3 text-sm leading-7 text-slate-300">{copy.body}</p>
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
-            {/* Intervention Popup — floating Socratic prompt */}
-            <AnimatePresence>
-                {interventionMessage && (
-                    <motion.div
-                        key="intervention-popup"
-                        initial={{ opacity: 0, y: 30, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 20, scale: 0.95 }}
-                        transition={{ type: 'spring', damping: 20, stiffness: 300 }}
-                        className="absolute inset-x-6 bottom-20 z-30 mx-auto max-w-md"
-                    >
-                        <div className="rounded-2xl border border-fuchsia-300/30 bg-fuchsia-950/80 px-6 py-5 shadow-[0_20px_60px_rgba(168,85,247,0.2)] backdrop-blur-lg">
-                            <div className="flex items-start gap-3">
-                                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fuchsia-400/20">
-                                    <BrainCircuit size={16} className="text-fuchsia-300" />
-                                </div>
-                                <div>
-                                    <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-fuchsia-300/80">Cognitive Coach</p>
-                                    <p className="mt-2 text-sm leading-6 text-white/90">{interventionMessage}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
-            <div className="relative mt-4 flex items-center justify-between border-t border-white/10 pt-4 text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                <span className="inline-flex items-center gap-2">
-                    {micStatus === 'recording' ? <Mic size={14} /> : <MicOff size={14} />}
-                    {micStatus}
-                </span>
-                <span>{lifecycleState.replace('_', ' ')}</span>
             </div>
         </section>
     );

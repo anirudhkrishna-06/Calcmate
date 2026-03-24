@@ -13,10 +13,21 @@ export default function ThinkingReportPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
+    const aggregateReportRaw = localStorage.getItem('mathmend_session_report');
     const sessionId = localStorage.getItem('mathmend_session_id');
     const timeElapsed = parseInt(localStorage.getItem('mathmend_session_time') || localStorage.getItem('thinking_session_time') || '120', 10);
 
     useEffect(() => {
+        if (aggregateReportRaw) {
+            try {
+                setReport(JSON.parse(aggregateReportRaw));
+                setLoading(false);
+                return;
+            } catch (err) {
+                console.error('Aggregate report parse error:', err);
+            }
+        }
+
         if (!sessionId) {
             setLoading(false);
             setError('No session found. Please complete a thinking session first.');
@@ -42,7 +53,7 @@ export default function ThinkingReportPage() {
         }
 
         fetchReport();
-    }, [sessionId]);
+    }, [aggregateReportRaw, sessionId]);
 
     const formatTime = (seconds) => {
         const m = Math.floor(seconds / 60);
@@ -77,6 +88,10 @@ export default function ThinkingReportPage() {
 
     const metrics = report?.timeline_metrics || {};
     const vs = report?.validation_state || {};
+    const rounds = report?.rounds || [];
+    const totalQuestions = report?.total_questions || rounds.length || 1;
+    const correctAnswers = report?.correct_answers ?? rounds.filter((round) => round.answerResult?.correct).length;
+    const detailedReports = report?.detailed_report || [];
 
     const scores = [
         {
@@ -147,7 +162,8 @@ export default function ThinkingReportPage() {
                                 <Award size={40} className="text-white" />
                             </motion.div>
                             <h1 className="text-3xl font-extrabold mb-2 text-white">Thinking Session Complete!</h1>
-                            <p className="text-blue-100 text-lg opacity-90">You spent {formatTime(timeElapsed)} deeply analyzing the problem.</p>
+                            <p className="text-blue-100 text-lg opacity-90">You spent {formatTime(timeElapsed)} across {totalQuestions} question{totalQuestions === 1 ? '' : 's'}.</p>
+                            <p className="mt-2 text-sm text-blue-100/90">{correctAnswers} correct out of {totalQuestions}</p>
                         </div>
 
                         <div className="p-8">
@@ -229,6 +245,109 @@ export default function ThinkingReportPage() {
                                     <p className="text-xs text-gray-500 mt-1 font-medium">Off-Graph Steps</p>
                                 </div>
                             </motion.div>
+
+                            {rounds.length > 0 && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: 0.95 }}
+                                    className="mt-8"
+                                >
+                                    <h2 className="text-xl font-bold text-gray-900 mb-4">Question Summary</h2>
+                                    <div className="space-y-3">
+                                        {rounds.map((round) => (
+                                            <div key={`${round.sessionId}-${round.questionNumber}`} className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
+                                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                    <div>
+                                                        <p className="text-sm font-bold text-gray-900">Question {round.questionNumber}</p>
+                                                        <p className="mt-1 text-sm text-gray-600">{round.problemText}</p>
+                                                    </div>
+                                                    <div className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ${
+                                                        round.answerResult?.correct ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                                                    }`}>
+                                                        {round.answerResult?.correct ? 'Correct' : 'Wrong / Not checked'}
+                                                    </div>
+                                                </div>
+                                                <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                                    <div className="rounded-xl bg-gray-50 p-3">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">Thinking</p>
+                                                        <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(round.thinkingSeconds || 0)}</p>
+                                                    </div>
+                                                    <div className="rounded-xl bg-gray-50 p-3">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">Solving</p>
+                                                        <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(round.solvingSeconds || 0)}</p>
+                                                    </div>
+                                                    <div className="rounded-xl bg-gray-50 p-3">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">Upload Grace</p>
+                                                        <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(round.uploadGraceUsed || 0)}</p>
+                                                    </div>
+                                                    <div className="rounded-xl bg-gray-50 p-3">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">Your Answer</p>
+                                                        <p className="mt-2 text-sm font-bold text-gray-900">{round.answerResult?.extracted_answer || 'N/A'}</p>
+                                                    </div>
+                                                </div>
+
+                                                {round.report?.time_analysis && (
+                                                    <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                                        <div className="rounded-xl bg-indigo-50 p-3">
+                                                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-500">To Strategy</p>
+                                                            <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(Math.round(round.report.time_analysis.time_to_strategy_seconds || 0))}</p>
+                                                        </div>
+                                                        <div className="rounded-xl bg-indigo-50 p-3">
+                                                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-500">To Execution</p>
+                                                            <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(Math.round(round.report.time_analysis.time_to_execution_seconds || 0))}</p>
+                                                        </div>
+                                                        <div className="rounded-xl bg-indigo-50 p-3">
+                                                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-500">Longest Silence</p>
+                                                            <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(Math.round(round.report.time_analysis.longest_silence_seconds || 0))}</p>
+                                                        </div>
+                                                        <div className="rounded-xl bg-indigo-50 p-3">
+                                                            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-500">Expected</p>
+                                                            <p className="mt-2 text-sm font-bold text-gray-900">{round.answerResult?.expected_answer || 'N/A'}</p>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {round.report?.detailed_analysis && (
+                                                    <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50/70 p-4">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-amber-700">Question Analysis</p>
+                                                        <p className="mt-3 text-sm leading-7 text-amber-950">{round.report.detailed_analysis}</p>
+                                                    </div>
+                                                )}
+
+                                                {round.report?.improvement_rule && (
+                                                    <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-700">Targeted Improvement</p>
+                                                        <p className="mt-3 text-sm leading-7 text-emerald-950">{round.report.improvement_rule}</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </motion.div>
+                            )}
+
+                            {detailedReports.length > 0 && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ delay: 0.98 }}
+                                    className="mt-8 rounded-2xl border border-blue-100 bg-blue-50/70 p-5"
+                                >
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <Clock size={18} className="text-blue-600" />
+                                        <span className="font-bold text-blue-800 text-sm">Session Time Analysis</span>
+                                    </div>
+                                    <div className="space-y-3">
+                                        {detailedReports.map((item) => (
+                                            <div key={item.question_number} className="rounded-xl bg-white/90 p-4">
+                                                <p className="text-sm font-bold text-gray-900">Question {item.question_number}</p>
+                                                <p className="mt-2 text-sm leading-7 text-gray-700">{item.detailed_analysis || item.insight}</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </motion.div>
+                            )}
 
                             {/* Gemini Insight */}
                             {report?.insight && (

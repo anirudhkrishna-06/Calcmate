@@ -50,10 +50,22 @@ class GeminiSettings(BaseModel):
 
 
 class Gemini2Settings(BaseModel):
-    """Second Gemini key — used exclusively for report generation and answer validation."""
     api_key: str | None = None
     model: str = "gemini-2.0-flash"
     timeout_seconds: float = 10.0
+
+
+class Gemini3Settings(BaseModel):
+    api_key: str | None = None
+    model: str = "gemini-2.0-flash"
+    timeout_seconds: float = 10.0
+
+
+class OllamaSettings(BaseModel):
+    enabled: bool = False
+    base_url: str = "http://localhost:11434/v1"
+    model: str = "qwen3.5:397b-cloud"
+    timeout_seconds: float = 20.0
 
 
 class EngineSettings(BaseModel):
@@ -61,12 +73,15 @@ class EngineSettings(BaseModel):
     llm: LLMRefinementSettings
     gemini: GeminiSettings
     gemini2: Gemini2Settings
+    gemini3: Gemini3Settings
+    ollama: OllamaSettings
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> EngineSettings:
     raw_keywords = os.getenv("DEEPGRAM_KEYWORDS", "")
     keywords = [keyword.strip() for keyword in raw_keywords.split(",") if keyword.strip()]
+
     deepgram = DeepgramSettings(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         base_url=os.getenv("DEEPGRAM_LISTEN_URL", "https://api.deepgram.com/v1/listen"),
@@ -105,4 +120,23 @@ def get_settings() -> EngineSettings:
         model=os.getenv("GEMINI2_MODEL", "gemini-2.0-flash"),
         timeout_seconds=float(os.getenv("GEMINI2_TIMEOUT_SECONDS", "10.0")),
     )
-    return EngineSettings(deepgram=deepgram, llm=llm, gemini=gemini, gemini2=gemini2)
+    gemini3 = Gemini3Settings(
+        api_key=os.getenv("GEMINI3_API_KEY"),
+        model=os.getenv("GEMINI3_MODEL", os.getenv("GEMINI2_MODEL", "gemini-2.0-flash")),
+        timeout_seconds=float(os.getenv("GEMINI3_TIMEOUT_SECONDS", "10.0")),
+    )
+    ollama = OllamaSettings(
+        enabled=os.getenv("OLLAMA_ENABLED", "true").lower() == "true",
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        model=os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud"),
+        timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "20.0")),
+    )
+
+    return EngineSettings(
+        deepgram=deepgram,
+        llm=llm,
+        gemini=gemini,
+        gemini2=gemini2,
+        gemini3=gemini3,
+        ollama=ollama,
+    )

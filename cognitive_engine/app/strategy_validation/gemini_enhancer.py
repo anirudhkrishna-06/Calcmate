@@ -126,7 +126,6 @@ class GeminiGraphEnhancer:
     # -----------------------------------------------------------------------
 
     async def _call_gemini(self, prompt: str) -> str | None:
-        url = self.settings.base_url_template.format(model=self.settings.model)
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -134,19 +133,37 @@ class GeminiGraphEnhancer:
                 "responseMimeType": "application/json",
             },
         }
-        try:
-            timeout = max(self.settings.timeout_seconds, 5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    url, params={"key": self.settings.api_key}, json=body
-                )
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.TimeoutException:
-            logger.warning("Gemini graph enhancement timed out")
-            return None
-        except Exception as exc:
-            logger.exception("Gemini graph enhancement failed | error=%s", exc)
+        settings = get_settings()
+        candidates = [
+            ("GEMINI", self.settings.api_key, self.settings.model, max(self.settings.timeout_seconds, 5.0)),
+            ("GEMINI3", settings.gemini3.api_key, settings.gemini3.model, max(settings.gemini3.timeout_seconds, 5.0)),
+            ("GEMINI2", settings.gemini2.api_key, settings.gemini2.model, max(settings.gemini2.timeout_seconds, 5.0)),
+        ]
+
+        payload = None
+        for provider, api_key, model, timeout in candidates:
+            if not api_key:
+                continue
+            url = self.settings.base_url_template.format(model=model)
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        url, params={"key": api_key}, json=body
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    logger.info("Gemini graph enhancement succeeded | provider=%s", provider)
+                    break
+            except httpx.TimeoutException:
+                logger.warning("Gemini graph enhancement timed out | provider=%s", provider)
+            except httpx.HTTPStatusError as exc:
+                logger.warning("Gemini graph enhancement failed | provider=%s status=%s", provider, exc.response.status_code)
+                if exc.response.status_code not in {429, 500, 502, 503, 504}:
+                    return None
+            except Exception as exc:
+                logger.warning("Gemini graph enhancement failed | provider=%s error=%s", provider, exc)
+
+        if payload is None:
             return None
 
         # Extract text

@@ -115,6 +115,17 @@ class AcousticFeatureAgent:
 
 
 class TranscriptionAgent:
+    def _build_transcription_keywords(self, session_state: SessionState) -> list[str]:
+        if not session_state.problem_structure:
+            return []
+
+        keywords = list(session_state.problem_structure.keyword_bank or [])
+        keywords.extend(session_state.problem_structure.concepts or [])
+        for method in session_state.problem_structure.methods:
+            keywords.append(method.name)
+            keywords.extend(method.keywords[:4])
+        return [keyword for keyword in list(dict.fromkeys(keywords)) if keyword][:20]
+
     async def process(self, event: EngineEvent, session_state: SessionState) -> list[EngineEvent]:
         if event.event_type != EngineEventType.ACOUSTIC_PROFILE_COMPUTED:
             return []
@@ -130,6 +141,7 @@ class TranscriptionAgent:
                 chunk_id=str(payload.get("chunk_id")),
                 audio_bytes=payload.get("audio_bytes") or b"",
                 mime_type=(payload.get("frontend_features") or {}).get("extra", {}).get("mime_type"),
+                keywords=self._build_transcription_keywords(session_state),
             )
 
         sentence_events: list[EngineEvent] = []
@@ -395,7 +407,12 @@ class StrategyValidatorAgent:
         ))
 
         # 6. Conditional events based on metric thresholds
-        if validation_state.deviation_score >= 0.40:
+        low_signal_off_graph = (
+            (not path_node.is_on_graph and path_node.node_label.startswith("off_graph:silence_or_filler"))
+            or (chunk.transcript is not None and len(chunk.transcript.split()) <= 2)
+        )
+
+        if validation_state.deviation_score >= 0.40 and not low_signal_off_graph:
             deviation_type = (
                 DeviationType.HARD_DEVIATION.value
                 if not path_node.is_on_graph
@@ -549,8 +566,8 @@ class InterventionAgent:
     """
 
     MAX_INTERVENTIONS = 3
-    COOLDOWN_SECONDS = 12.0  # Min seconds between interventions
-    SILENCE_STREAK_THRESHOLD = 3  # Consecutive silence chunks before prompting
+    COOLDOWN_SECONDS = 14.0  # Min seconds between interventions
+    SILENCE_STREAK_THRESHOLD = 2  # With 5s chunks this means sustained silence/delay
 
     def __init__(self) -> None:
         self._last_intervention_at: float = -999.0
@@ -643,7 +660,7 @@ class InterventionAgent:
         delay_score = float(event.payload.get("delay_score", 0.0))
 
         # Only intervene on significant delay OR extended silence
-        if delay_score < 0.60 and self._silence_streak < self.SILENCE_STREAK_THRESHOLD:
+        if delay_score < 0.72 and self._silence_streak < self.SILENCE_STREAK_THRESHOLD:
             return []
 
         optimal, domain = self._get_context(session_state)
@@ -712,9 +729,9 @@ class ReportGeneratorAgent:
         # Build thinking graph string from cognitive path
         thinking_graph = self._build_thinking_graph(path)
 
-        # Generate Gemini-powered insight
-        insight, improvement_rule = await self._generate_gemini_insight(
-            session_state, thinking_graph, metrics, vs
+        time_analysis = self._build_time_analysis(session_state, metrics)
+        insight_payload = await self._generate_gemini_insight(
+            session_state, thinking_graph, metrics, vs, time_analysis
         )
 
         report: dict = {
@@ -723,8 +740,10 @@ class ReportGeneratorAgent:
             "total_chunks": len(session_state.chunks),
             "total_interventions": session_state.intervention_count,
             "thinking_graph": thinking_graph,
-            "insight": insight,
-            "improvement_rule": improvement_rule,
+            "insight": insight_payload["insight"],
+            "improvement_rule": insight_payload["improvement_rule"],
+            "detailed_analysis": insight_payload["detailed_analysis"],
+            "time_analysis": time_analysis,
             "timeline_metrics": metrics.model_dump(mode="json"),
             "validation_state": vs.model_dump(mode="json") if vs else None,
         }
@@ -740,6 +759,42 @@ class ReportGeneratorAgent:
             session_id=event.session_id,
             payload=report,
         )]
+
+    def _build_time_analysis(self, session_state, metrics) -> dict:
+        chunks = session_state.chunks
+
+        def first_time(intent_names: set[str]) -> float | None:
+            for chunk in chunks:
+                if chunk.intent_refined.value in intent_names:
+                    return round(chunk.timestamp.start_time, 2)
+            return None
+
+        longest_silence = 0.0
+        for chunk in chunks:
+            longest_silence = max(
+                longest_silence,
+                chunk.acoustic_profile.leading_silence_seconds,
+                chunk.acoustic_profile.trailing_silence_seconds,
+            )
+
+        return {
+            "time_to_understanding_seconds": first_time({"problem_understanding", "parameter_recognition", "conceptual_explanation"}),
+            "time_to_strategy_seconds": first_time({"strategy_selection", "comparison_analysis"}),
+            "time_to_execution_seconds": first_time({"execution_start", "solution_summary"}),
+            "time_to_verification_seconds": first_time({"verification"}),
+            "thinking_window_seconds": round(sum(chunk.timestamp.end_time - chunk.timestamp.start_time for chunk in chunks), 2),
+            "longest_silence_seconds": round(longest_silence, 2),
+            "intervention_timestamps": [
+                round(item.at_seconds, 2)
+                for item in session_state.timeline
+                if item.category == "intervention"
+            ],
+            "understanding_time_seconds": metrics.understanding_time_seconds,
+            "strategy_delay_seconds": metrics.strategy_delay_seconds,
+            "deviation_time_seconds": metrics.deviation_time_seconds,
+            "execution_time_seconds": metrics.execution_time_seconds,
+            "verification_time_seconds": metrics.verification_time_seconds,
+        }
 
     def _build_thinking_graph(self, path) -> str:
         """Build a readable thinking path string from the cognitive path."""
@@ -771,74 +826,92 @@ class ReportGeneratorAgent:
             if not phase_labels or phase_labels[-1] != label:
                 phase_labels.append(label)
 
-        return " → ".join(phase_labels)
+        return " -> ".join(phase_labels)
+
+    def _build_timeline_digest(self, session_state) -> str:
+        digest_lines: list[str] = []
+        for chunk in session_state.chunks[-8:]:
+            digest_lines.append(
+                f"{chunk.timestamp.start_time:.1f}-{chunk.timestamp.end_time:.1f}s | "
+                f"{chunk.intent_refined.value} | confidence={chunk.confidence:.2f} | "
+                f"transcript={chunk.transcript or '<none>'}"
+            )
+        return "\n".join(digest_lines) if digest_lines else "No chunk timeline available."
 
     async def _generate_gemini_insight(
-        self, session_state, thinking_graph: str, metrics, vs
-    ) -> tuple[str, str]:
-        """Use Gemini2 to generate a personalized insight and improvement rule."""
+        self, session_state, thinking_graph: str, metrics, vs, time_analysis: dict
+    ) -> dict:
+        """Use Gemini only to generate detailed reasoning analysis for one question."""
         from .config import get_settings
-        settings = get_settings()
-        api_key = settings.gemini2.api_key
+        import json
+        import httpx
 
-        if not api_key:
-            # Fallback: generate rule-based insight
-            return self._fallback_insight(session_state, thinking_graph, vs)
+        settings = get_settings()
+        candidates = [
+            ("GEMINI3", settings.gemini3.api_key, settings.gemini3.model, settings.gemini3.timeout_seconds),
+            ("GEMINI2", settings.gemini2.api_key, settings.gemini2.model, settings.gemini2.timeout_seconds),
+        ]
 
         problem_text = session_state.problem_payload.raw_text if session_state.problem_payload else ""
+        timeline_digest = self._build_timeline_digest(session_state)
         prompt = (
-            f"A student just completed a math thinking session. Analyze their performance and give feedback.\n\n"
+            f"A student just completed one math thinking session. Generate a detailed report.\n\n"
             f"Problem: {problem_text[:300]}\n\n"
             f"Thinking path: {thinking_graph}\n"
-            f"Understanding time: {metrics.understanding_time_seconds:.1f}s\n"
-            f"Strategy delay: {metrics.strategy_delay_seconds:.1f}s\n"
-            f"Deviation time: {metrics.deviation_time_seconds:.1f}s\n"
-            f"Execution time: {metrics.execution_time_seconds:.1f}s\n"
+            f"Timeline metrics: {metrics.model_dump(mode='json')}\n"
+            f"Time analysis: {time_analysis}\n"
             f"Interventions needed: {session_state.intervention_count}\n"
             f"Alignment score: {vs.path_alignment_score:.2f}\n"
             f"Progress: {vs.progress_ratio:.0%}\n\n"
-            f"Respond in EXACTLY this format (2 lines only):\n"
-            f"INSIGHT: <1-2 sentence observation about their thinking process>\n"
-            f"IMPROVE: <1 sentence actionable improvement suggestion>"
+            f"Recent chunk digest:\n{timeline_digest}\n\n"
+            f"Return valid JSON only with keys "
+            f"\"insight\", \"improvement_rule\", and \"detailed_analysis\".\n"
+            f"The detailed_analysis must discuss understanding time, time to strategy, execution pace, verification, longest silence, interventions, and how the strategy evolved over time."
         )
 
-        try:
-            import httpx
-            model = settings.gemini2.model
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        if not any(api_key for _, api_key, _, _ in candidates):
+            return self._fallback_insight(session_state, thinking_graph, vs, time_analysis)
 
-            async with httpx.AsyncClient(timeout=settings.gemini2.timeout_seconds) as client:
-                response = await client.post(url, json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.4, "maxOutputTokens": 256},
-                })
-                response.raise_for_status()
-                data = response.json()
+        for provider, api_key, model, timeout_seconds in candidates:
+            if not api_key:
+                continue
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-            text = ""
-            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-            for part in parts:
-                text += part.get("text", "")
+                async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                    response = await client.post(url, json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.35,
+                            "maxOutputTokens": 700,
+                            "responseMimeType": "application/json",
+                        },
+                    })
+                    response.raise_for_status()
+                    data = response.json()
 
-            # Parse response
-            insight = ""
-            improvement = ""
-            for line in text.strip().split("\n"):
-                if line.startswith("INSIGHT:"):
-                    insight = line[len("INSIGHT:"):].strip()
-                elif line.startswith("IMPROVE:"):
-                    improvement = line[len("IMPROVE:"):].strip()
+                text = "".join(
+                    part.get("text", "")
+                    for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                )
+                parsed = json.loads(text)
+                insight = str(parsed.get("insight", "")).strip()
+                improvement = str(parsed.get("improvement_rule", "")).strip()
+                detailed = str(parsed.get("detailed_analysis", "")).strip()
 
-            if insight and improvement:
-                logger.info("Gemini insight generated successfully")
-                return insight, improvement
+                if insight and improvement and detailed:
+                    logger.info("Gemini insight generated successfully | provider=%s", provider)
+                    return {
+                        "insight": insight,
+                        "improvement_rule": improvement,
+                        "detailed_analysis": detailed,
+                    }
+            except Exception as exc:
+                logger.warning("Gemini insight generation failed | provider=%s error=%s", provider, exc)
 
-        except Exception as exc:
-            logger.warning("Gemini insight generation failed | error=%s", exc)
+        return self._fallback_insight(session_state, thinking_graph, vs, time_analysis)
 
-        return self._fallback_insight(session_state, thinking_graph, vs)
-
-    def _fallback_insight(self, session_state, thinking_graph: str, vs) -> tuple[str, str]:
+    def _fallback_insight(self, session_state, thinking_graph: str, vs, time_analysis: dict) -> dict:
         """Rule-based fallback when Gemini is unavailable."""
         if vs.progress_ratio >= 0.8:
             insight = "You made excellent progress through the solution, demonstrating strong problem-solving skills."
@@ -861,7 +934,21 @@ class ReportGeneratorAgent:
         else:
             improvement = "Continue thinking aloud clearly — your reasoning shows good analytical thinking."
 
-        return insight, improvement
+        detailed_analysis = (
+            f"The session moved through '{thinking_graph}'. Understanding took "
+            f"{time_analysis['understanding_time_seconds']:.1f}s, strategy work took "
+            f"{time_analysis['strategy_delay_seconds']:.1f}s, execution took "
+            f"{time_analysis['execution_time_seconds']:.1f}s, and verification took "
+            f"{time_analysis['verification_time_seconds']:.1f}s. The longest silence was "
+            f"{time_analysis['longest_silence_seconds']:.1f}s, and interventions happened at "
+            f"{time_analysis['intervention_timestamps'] or 'no intervention points'}."
+        )
+
+        return {
+            "insight": insight,
+            "improvement_rule": improvement,
+            "detailed_analysis": detailed_analysis,
+        }
 
 
 problem_structuring_agent = ProblemStructuringAgent()

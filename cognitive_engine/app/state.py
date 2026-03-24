@@ -122,19 +122,19 @@ def build_acoustic_profile(features: FrontendAudioFeatures, start_time: float, e
 
 
 def should_transcribe(acoustic_profile: AcousticProfile) -> tuple[bool, str | None]:
-    if acoustic_profile.speech_density < 0.08 and acoustic_profile.effective_speech_duration < 0.5:
+    if acoustic_profile.speech_density < 0.06 and acoustic_profile.effective_speech_duration < 0.35:
         return False, "low_speech_density"
-    if acoustic_profile.silence_ratio > 0.96 and acoustic_profile.normalized_energy < 0.5:
+    if acoustic_profile.silence_ratio > 0.985 and acoustic_profile.effective_speech_duration < 0.2 and acoustic_profile.normalized_energy < 0.42:
         return False, "mostly_silence"
     return True, None
 
 
 def fallback_intent_from_acoustics(acoustic_profile: AcousticProfile, previous_phase: SessionPhase) -> tuple[CognitiveIntent, float, str]:
-    if acoustic_profile.silence_ratio >= 0.92 and acoustic_profile.trailing_silence_seconds >= 1.2:
+    if acoustic_profile.silence_ratio >= 0.975 and acoustic_profile.trailing_silence_seconds >= 2.8:
         return CognitiveIntent.SILENCE_REFLECTION, 0.76, "Acoustic silence pattern suggests reflective pause."
     if acoustic_profile.speech_density >= 0.62 and acoustic_profile.hesitation_score <= 0.28:
         return CognitiveIntent.PROBLEM_UNDERSTANDING, 0.58, "Speech was continuous but no semantic transcript was available."
-    if previous_phase == SessionPhase.STRATEGY and acoustic_profile.trailing_silence_seconds >= 1.5:
+    if previous_phase == SessionPhase.STRATEGY and acoustic_profile.trailing_silence_seconds >= 2.6:
         return CognitiveIntent.EXECUTION_START, 0.54, "Prior strategy phase followed by silence suggests execution onset."
     return CognitiveIntent.UNKNOWN, 0.35, "Acoustics alone were insufficient for a strong semantic classification."
 

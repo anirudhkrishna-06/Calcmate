@@ -210,6 +210,8 @@ class SessionOrchestrator:
         state = store.get(session_id)
         if state is None:
             raise KeyError("Session not found.")
+        if state.cached_report:
+            return state.cached_report
         metrics = build_timeline_metrics(state)
         vs = state.validation_state
         path = state.cognitive_path
@@ -218,22 +220,27 @@ class SessionOrchestrator:
         from .agents import report_generator_agent
         thinking_graph = report_generator_agent._build_thinking_graph(path)
 
-        # Generate Gemini insight
-        insight, improvement_rule = await report_generator_agent._generate_gemini_insight(
-            state, thinking_graph, metrics, vs
+        time_analysis = report_generator_agent._build_time_analysis(state, metrics)
+        insight_payload = await report_generator_agent._generate_gemini_insight(
+            state, thinking_graph, metrics, vs, time_analysis
         )
 
-        return {
+        report = {
             "session_id": session_id,
             "timeline_metrics": metrics.model_dump(mode="json"),
             "thinking_graph": thinking_graph,
-            "insight": insight,
-            "improvement_rule": improvement_rule,
+            "insight": insight_payload["insight"],
+            "improvement_rule": insight_payload["improvement_rule"],
+            "detailed_analysis": insight_payload["detailed_analysis"],
+            "time_analysis": time_analysis,
             "total_chunks": len(state.chunks),
             "total_interventions": state.intervention_count,
             "validation_state": vs.model_dump(mode="json") if vs else None,
             "answer_result": None,
         }
+        state.cached_report = report
+        store.save(state)
+        return report
 
     async def send_snapshot(self, session_id: str) -> None:
         state = store.get(session_id)
@@ -301,6 +308,11 @@ class SessionOrchestrator:
         elif event.event_type == EngineEventType.INTERVENTION_TRIGGERED:
             await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="intervention", data={"message": event.payload.get("message", "Intervention triggered"), "reason": event.payload.get("reason"), "timestamp": event.payload.get("at_seconds", 0.0)}))
         elif event.event_type == EngineEventType.STATUS_UPDATED:
+            if "insight" in event.payload or "detailed_analysis" in event.payload:
+                state.cached_report = {
+                    "session_id": state.session_id,
+                    **event.payload,
+                }
             await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="status_update", data={"status": event.payload.get("status", "Idle...")}))
         elif event.event_type == EngineEventType.PATH_UPDATE:
             await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="path_update", data=event.payload))

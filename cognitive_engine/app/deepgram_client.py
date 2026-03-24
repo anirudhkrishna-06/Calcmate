@@ -45,6 +45,7 @@ class DeepgramTranscriptionClient:
         chunk_id: str,
         audio_bytes: bytes,
         mime_type: str | None,
+        keywords: list[str] | None = None,
     ) -> TranscriptResult:
         if not audio_bytes:
             return TranscriptResult(skipped=True, skip_reason="empty_audio_blob", provider="deepgram", model=self.settings.model)
@@ -65,7 +66,12 @@ class DeepgramTranscriptionClient:
             )
 
         try:
-            payload = await self._request_transcription(audio_bytes=audio_bytes, mime_type=mime_type, use_keywords=self.settings.use_keywords)
+            payload = await self._request_transcription(
+                audio_bytes=audio_bytes,
+                mime_type=mime_type,
+                use_keywords=self.settings.use_keywords or bool(keywords),
+                extra_keywords=keywords or [],
+            )
         except httpx.HTTPStatusError as exc:
             response_text = exc.response.text if exc.response is not None else "<no body>"
             logger.warning(
@@ -77,7 +83,12 @@ class DeepgramTranscriptionClient:
             )
             if self.settings.use_keywords:
                 try:
-                    payload = await self._request_transcription(audio_bytes=audio_bytes, mime_type=mime_type, use_keywords=False)
+                    payload = await self._request_transcription(
+                        audio_bytes=audio_bytes,
+                        mime_type=mime_type,
+                        use_keywords=False,
+                        extra_keywords=[],
+                    )
                     logger.info("Deepgram retry succeeded without keywords | session=%s chunk=%s", session_id, chunk_id)
                 except Exception as retry_exc:
                     logger.exception("Deepgram transcription retry failed | session=%s chunk=%s error=%s", session_id, chunk_id, retry_exc)
@@ -100,7 +111,14 @@ class DeepgramTranscriptionClient:
         )
         return transcript_result
 
-    async def _request_transcription(self, *, audio_bytes: bytes, mime_type: str | None, use_keywords: bool) -> dict[str, Any]:
+    async def _request_transcription(
+        self,
+        *,
+        audio_bytes: bytes,
+        mime_type: str | None,
+        use_keywords: bool,
+        extra_keywords: list[str],
+    ) -> dict[str, Any]:
         params: list[tuple[str, Any]] = [
             ("model", self.settings.model),
             ("language", self.settings.language),
@@ -111,7 +129,8 @@ class DeepgramTranscriptionClient:
             ("diarize", str(self.settings.diarize).lower()),
         ]
         if use_keywords:
-            for keyword in self.settings.keywords:
+            merged_keywords = list(dict.fromkeys([*self.settings.keywords, *extra_keywords]))
+            for keyword in merged_keywords[:20]:
                 params.append(("keywords", keyword))
 
         headers = {
@@ -146,7 +165,7 @@ class DeepgramTranscriptionClient:
             for item in (best.get("words") or [])
             if item.get("word")
         ]
-        segments = self._parse_utterances(results.get("utterances") or [])
+        segments = self._merge_short_utterances(self._parse_utterances(results.get("utterances") or []))
         result = TranscriptResult(
             transcript=transcript,
             confidence=confidence,
@@ -190,6 +209,38 @@ class DeepgramTranscriptionClient:
                 )
             )
         return segments
+
+    def _merge_short_utterances(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+        if len(segments) <= 1:
+            return segments
+
+        merged: list[TranscriptSegment] = []
+        index = 0
+        while index < len(segments):
+            current = segments[index]
+            token_count = len((current.transcript or "").split())
+            should_merge = token_count <= 1 or current.confidence < 0.25
+            if should_merge and index + 1 < len(segments):
+                nxt = segments[index + 1]
+                merged_words = [*current.words, *nxt.words]
+                merged_text = " ".join(part for part in [current.transcript, nxt.transcript] if part).strip()
+                merged.append(
+                    TranscriptSegment(
+                        segment_id=f"{current.segment_id}_{nxt.segment_id}",
+                        transcript=merged_text or current.transcript or nxt.transcript,
+                        start=current.start,
+                        end=nxt.end,
+                        confidence=max(current.confidence, nxt.confidence),
+                        words=merged_words,
+                    )
+                )
+                index += 2
+                continue
+
+            merged.append(current)
+            index += 1
+
+        return merged
 
 
 transcription_client = DeepgramTranscriptionClient()

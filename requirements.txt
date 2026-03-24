@@ -8,3 +8,13 @@ python-dotenv
 tqdm
 ctransformers
 transformers
+numpy<2
+fastapi
+uvicorn
+openai
+easyocr
+opencv-python
+pillow
+pytesseract
+matplotlib
+python-multipart

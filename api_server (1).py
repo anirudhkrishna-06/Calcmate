@@ -5,24 +5,16 @@ import uvicorn
 import os
 import tempfile
 import asyncio
-import ast
-from fractions import Fraction
 import logging
 import time
 import uuid
 import re
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Any
-import json
-from types import SimpleNamespace
-from urllib import error as urllib_error
-from urllib import request as urllib_request
+from openai import AsyncOpenAI
+from adaptive_quiz import QuestionBank, ThompsonBandit, PracticeForum
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
+
 # --- Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -31,86 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger("MathMendAPI")
 
 # ---------------------------------------------------------------
-# CONFIG — qwen3.5:397b-cloud via Ollama
-# Run first: ollama run qwen3.5:397b-cloud
+# CONFIG — local Ollama model
+# Run first: ollama pull qwen2.5:3b
 # ---------------------------------------------------------------
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+MODEL_NAME = "qwen2.5:3b"
 
-
-class _OllamaChatCompletions:
-    def __init__(self, base_url: str, timeout_seconds: float):
-        self._base_url = base_url.rstrip("/")
-        self._timeout_seconds = timeout_seconds
-
-    async def create(self, *, model: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int):
-        def _post():
-            headers = {"Content-Type": "application/json"}
-
-            attempts = []
-            if self._base_url.endswith("/v1"):
-                attempts.append((f"{self._base_url}/chat/completions", "openai"))
-            else:
-                attempts.append((f"{self._base_url}/api/chat", "ollama"))
-                attempts.append((f"{self._base_url}/v1/chat/completions", "openai"))
-
-            last_exc = None
-            for url, mode in attempts:
-                if mode == "ollama":
-                    payload = json.dumps(
-                        {
-                            "model": model,
-                            "messages": messages,
-                            "stream": False,
-                            "options": {
-                                "temperature": temperature,
-                                "num_predict": max_tokens,
-                            },
-                        }
-                    ).encode("utf-8")
-                else:
-                    payload = json.dumps(
-                        {
-                            "model": model,
-                            "messages": messages,
-                            "temperature": temperature,
-                            "max_tokens": max_tokens,
-                        }
-                    ).encode("utf-8")
-
-                req = urllib_request.Request(
-                    url,
-                    data=payload,
-                    headers=headers,
-                    method="POST",
-                )
-                try:
-                    with urllib_request.urlopen(req, timeout=self._timeout_seconds) as resp:
-                        raw = resp.read().decode("utf-8")
-                    data = json.loads(raw)
-                    if mode == "openai":
-                        content = data["choices"][0]["message"]["content"]
-                    else:
-                        content = data["message"]["content"]
-                    return SimpleNamespace(
-                        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
-                    )
-                except Exception as exc:
-                    last_exc = exc
-                    continue
-
-            raise RuntimeError(f"Failed to contact Ollama at {self._base_url}: {last_exc}") from last_exc
-
-        return await asyncio.to_thread(_post)
-
-
-class _OllamaClient:
-    def __init__(self, base_url: str, timeout_seconds: float):
-        self.chat = SimpleNamespace(completions=_OllamaChatCompletions(base_url, timeout_seconds))
-
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
-llm_client = _OllamaClient(base_url=OLLAMA_BASE_URL, timeout_seconds=OLLAMA_TIMEOUT_SECONDS)
+llm_client = AsyncOpenAI(
+    api_key="ollama",
+    base_url="http://localhost:11434/v1",
+)
 
 # ---------------------------------------------------------------
 # OCR — lazy import
@@ -118,29 +39,18 @@ llm_client = _OllamaClient(base_url=OLLAMA_BASE_URL, timeout_seconds=OLLAMA_TIME
 try:
     from hybrid_ocr_monopoly import process_image, get_easyocr_reader
     OCR_AVAILABLE = True
-except ImportError:
+except Exception as exc:
     OCR_AVAILABLE = False
-    logger.warning("OCR module not available — /ocr endpoint will be disabled.")
+    logger.warning(f"OCR module not available — /ocr endpoint will be disabled. Reason: {exc}")
 
 # ---------------------------------------------------------------
-# Quiz — lazy import so API startup does not fail if quiz deps are missing
+# Quiz — initialize once at module level
 # ---------------------------------------------------------------
 quiz_sessions: Dict[str, Any] = {}
-QUIZ_AVAILABLE = False
-_question_bank = None
-_bandit = None
-_forum = None
-
-try:
-    from adaptive_quiz import QuestionBank, ThompsonBandit, PracticeForum
-
-    _question_bank = QuestionBank()
-    _bandit = ThompsonBandit(_question_bank.all_topics)
-    _bandit.load_profile("bayes_model.json")   # loads saved progress if it exists
-    _forum = PracticeForum()
-    QUIZ_AVAILABLE = True
-except ImportError as exc:
-    logger.warning(f"Quiz module unavailable — quiz endpoints will be disabled: {exc}")
+_question_bank = QuestionBank()
+_bandit = ThompsonBandit(_question_bank.all_topics)
+_bandit.load_profile("bayes_model.json")   # loads saved progress if it exists
+_forum = PracticeForum()
 
 # ---------------------------------------------------------------
 # System prompt
@@ -217,11 +127,6 @@ class OCRResponse(BaseModel):
     extracted_text: str
     latency_ms: float
 
-
-def _require_quiz():
-    if not QUIZ_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Quiz module dependencies are not installed on this server.")
-
 # ---------------------------------------------------------------
 # Pydantic models — Quiz
 # ---------------------------------------------------------------
@@ -282,108 +187,6 @@ def _parse_equations_from_text(text: str) -> List[str]:
                 equations.append(line)
     return equations[:6]
 
-
-def _extract_math_expression(question: str) -> str:
-    cleaned = question.strip()
-    cleaned = re.sub(
-        r"^(simplify|solve|evaluate|calculate|compute|find|what is|what's)\b[:\-\s]*",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = cleaned.split("?")[0].split(".")[0]
-    expr = re.sub(r"[^0-9\.\+\-\*\/\^\(\)\s]", "", cleaned)
-    expr = re.sub(r"\s+", "", expr).replace("^", "**")
-    return expr
-
-
-def _safe_eval_math_expression(expr: str):
-    def _eval(node):
-        if isinstance(node, ast.Expression):
-            return _eval(node.body)
-        if isinstance(node, ast.Constant):
-            value = node.value
-            if isinstance(value, (int, float)):
-                return Fraction(str(value))
-            raise ValueError("Unsupported constant")
-        if isinstance(node, ast.BinOp):
-            left = _eval(node.left)
-            right = _eval(node.right)
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            if isinstance(node.op, ast.Div):
-                return left / right
-            if isinstance(node.op, ast.Pow):
-                if right.denominator != 1:
-                    raise ValueError("Non-integer exponent")
-                return left ** int(right)
-            raise ValueError("Unsupported operator")
-        if isinstance(node, ast.UnaryOp):
-            operand = _eval(node.operand)
-            if isinstance(node.op, ast.UAdd):
-                return operand
-            if isinstance(node.op, ast.USub):
-                return -operand
-            raise ValueError("Unsupported unary operator")
-        raise ValueError("Unsupported expression")
-
-    parsed = ast.parse(expr, mode="eval")
-    return _eval(parsed)
-
-
-def _format_number(value):
-    if isinstance(value, Fraction):
-        if value.denominator == 1:
-            return str(value.numerator)
-        return f"{value.numerator}/{value.denominator} ({float(value):.6g})"
-    if isinstance(value, float):
-        return f"{value:.6g}"
-    return str(value)
-
-
-def _fallback_math_answer(question: str, latency_ms: float) -> ChatResponse:
-    expr = _extract_math_expression(question)
-    if expr and re.search(r"\d", expr):
-        try:
-            value = _safe_eval_math_expression(expr)
-            if isinstance(value, Fraction) and value.denominator != 1:
-                solution_value = float(value)
-            else:
-                solution_value = float(value)
-            answer_text = (
-                f"The expression is {expr}. "
-                f"Using order of operations, the value is {_format_number(value)}. "
-                f"Solution: value = {_format_number(value)}"
-            )
-            return ChatResponse(
-                answer=answer_text,
-                solution={"value": solution_value},
-                reasoning=answer_text,
-                equations=[f"{expr} = {_format_number(value)}"],
-                latency_ms=latency_ms,
-                result_type="fallback",
-            )
-        except Exception as exc:
-            logger.warning(f"Fallback math parser could not solve expression '{expr}': {exc}")
-
-    answer_text = (
-        "I could not reach the Ollama model on this machine, so I cannot produce a full model answer right now. "
-        "Please try a simpler arithmetic expression or install a smaller Ollama model. "
-        "Solution: value = unavailable"
-    )
-    return ChatResponse(
-        answer=answer_text,
-        solution={},
-        reasoning=answer_text,
-        equations=[],
-        latency_ms=latency_ms,
-        result_type="fallback",
-    )
-
 # ---------------------------------------------------------------
 # Routes — General
 # ---------------------------------------------------------------
@@ -393,7 +196,6 @@ async def health_check():
         "status": "healthy",
         "model": MODEL_NAME,
         "ocr_available": OCR_AVAILABLE,
-        "quiz_available": QUIZ_AVAILABLE,
     }
 
 # ---------------------------------------------------------------
@@ -429,10 +231,8 @@ async def chat_endpoint(req: ChatRequest):
             result_type="llm",
         )
     except Exception as e:
-        logger.warning(f"LLM call failed, using fallback: {e}", exc_info=True)
-        fallback = _fallback_math_answer(question, (time.time() - start_time) * 1000)
-        logger.info(f"Fallback response used | result_type={fallback.result_type}")
-        return fallback
+        logger.error(f"LLM call failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
 
 # ---------------------------------------------------------------
 # Routes — OCR
@@ -472,7 +272,6 @@ async def ocr_endpoint(image: UploadFile = File(...)):
 # ---------------------------------------------------------------
 @app.post("/quiz/start", response_model=QuizStartResponse)
 async def quiz_start(req: QuizStartRequest):
-    _require_quiz()
     topics = _bandit.select_topics(k=req.batch_size)
     questions_out = []
     raw_questions = []
@@ -500,7 +299,6 @@ async def quiz_start(req: QuizStartRequest):
 
 @app.post("/quiz/answer", response_model=QuizAnswerResponse)
 async def quiz_answer(req: QuizAnswerRequest):
-    _require_quiz()
     if req.session_id not in quiz_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -525,7 +323,6 @@ async def quiz_answer(req: QuizAnswerRequest):
 
 @app.get("/quiz/stats", response_model=QuizStatsResponse)
 async def quiz_stats():
-    _require_quiz()
     result = {}
     for topic in _question_bank.all_topics:
         mean, certainty = _bandit.get_stats(topic)

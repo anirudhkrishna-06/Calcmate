@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ProblemPanel from '../components/cognitive/ProblemPanel';
 import CognitiveIDE from '../components/cognitive/CognitiveIDE';
@@ -6,10 +6,15 @@ import TimelinePanel from '../components/cognitive/TimelinePanel';
 
 const API_BASE_URL = 'http://127.0.0.1:8000';
 const WS_BASE_URL = 'ws://127.0.0.1:8000';
-const CHUNK_DURATION_MS = 4000;
-const ANALYSER_FFT_SIZE = 1024;
-const MIN_VOICE_THRESHOLD = 0.012;
-const NOISE_MULTIPLIER = 2.4;
+const CHUNK_DURATION_MS = 5000;
+const ANALYSER_FFT_SIZE = 2048;
+const MIN_VOICE_THRESHOLD = 0.01;
+const NOISE_MULTIPLIER = 2.05;
+const UPLOAD_GRACE_SECONDS = 10;
+
+function createIdleWaveform() {
+    return Array.from({ length: 20 }, () => 10);
+}
 
 function formatTimer(totalSeconds) {
     const minutes = Math.floor(totalSeconds / 60);
@@ -17,12 +22,8 @@ function formatTimer(totalSeconds) {
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function createIdleWaveform() {
-    return Array.from({ length: 20 }, () => 10);
-}
-
 function normaliseCategory(category) {
-    if (["understanding", "parameter", "strategy", "delay", "deviation", "execution", "intervention", "signal", "system"].includes(category)) {
+    if (['understanding', 'parameter', 'strategy', 'delay', 'deviation', 'execution', 'intervention', 'signal', 'system'].includes(category)) {
         return category;
     }
     return 'signal';
@@ -70,29 +71,128 @@ function selectRecorderMimeType() {
     return supported || '';
 }
 
+function buildAggregateReport(rounds, reports) {
+    const safeReports = reports.filter(Boolean);
+    const totalThinkingTime = rounds.reduce((sum, round) => sum + (round.thinkingSeconds || 0), 0);
+    const totalSolvingTime = rounds.reduce((sum, round) => sum + (round.solvingSeconds || 0), 0);
+    const correctAnswers = rounds.filter((round) => round.answerResult?.correct).length;
+    const attemptedAnswers = rounds.filter((round) => round.answerResult).length;
+
+    const timelineMetrics = safeReports.reduce((totals, report) => {
+        const metrics = report.timeline_metrics || {};
+        return {
+            understanding_time_seconds: totals.understanding_time_seconds + (metrics.understanding_time_seconds || 0),
+            strategy_delay_seconds: totals.strategy_delay_seconds + (metrics.strategy_delay_seconds || 0),
+            deviation_time_seconds: totals.deviation_time_seconds + (metrics.deviation_time_seconds || 0),
+            execution_time_seconds: totals.execution_time_seconds + (metrics.execution_time_seconds || 0),
+            verification_time_seconds: totals.verification_time_seconds + (metrics.verification_time_seconds || 0),
+            decision_efficiency_score: totals.decision_efficiency_score + (metrics.decision_efficiency_score || 0),
+        };
+    }, {
+        understanding_time_seconds: 0,
+        strategy_delay_seconds: 0,
+        deviation_time_seconds: 0,
+        execution_time_seconds: 0,
+        verification_time_seconds: 0,
+        decision_efficiency_score: 0,
+    });
+
+    const avgEfficiency = safeReports.length > 0
+        ? Number((timelineMetrics.decision_efficiency_score / safeReports.length).toFixed(2))
+        : 0;
+
+    const validationState = safeReports.reduce((acc, report) => {
+        const vs = report.validation_state || {};
+        acc.path_alignment_score += vs.path_alignment_score || 0;
+        acc.progress_ratio += vs.progress_ratio || 0;
+        acc.deviation_score += vs.deviation_score || 0;
+        acc.inefficiency_score += vs.inefficiency_score || 0;
+        acc.oscillation_index += vs.oscillation_index || 0;
+        acc.on_graph_nodes += vs.on_graph_nodes || 0;
+        acc.off_graph_nodes += vs.off_graph_nodes || 0;
+        return acc;
+    }, {
+        path_alignment_score: 0,
+        progress_ratio: 0,
+        deviation_score: 0,
+        inefficiency_score: 0,
+        oscillation_index: 0,
+        on_graph_nodes: 0,
+        off_graph_nodes: 0,
+    });
+
+    if (safeReports.length > 0) {
+        validationState.path_alignment_score = Number((validationState.path_alignment_score / safeReports.length).toFixed(3));
+        validationState.progress_ratio = Number((validationState.progress_ratio / safeReports.length).toFixed(3));
+        validationState.deviation_score = Number((validationState.deviation_score / safeReports.length).toFixed(3));
+        validationState.inefficiency_score = Number((validationState.inefficiency_score / safeReports.length).toFixed(3));
+        validationState.oscillation_index = Number((validationState.oscillation_index / safeReports.length).toFixed(3));
+    }
+
+    return {
+        session_type: 'aggregate',
+        generated_at: new Date().toISOString(),
+        total_questions: rounds.length,
+        completed_questions: rounds.length,
+        correct_answers: correctAnswers,
+        attempted_answers: attemptedAnswers,
+        total_thinking_time: totalThinkingTime,
+        total_solving_time: totalSolvingTime,
+        total_session_time: totalThinkingTime + totalSolvingTime,
+        total_chunks: safeReports.reduce((sum, report) => sum + (report.total_chunks || 0), 0),
+        total_interventions: safeReports.reduce((sum, report) => sum + (report.total_interventions || 0), 0),
+        timeline_metrics: {
+            ...timelineMetrics,
+            decision_efficiency_score: avgEfficiency,
+        },
+        validation_state: validationState,
+        thinking_graph: safeReports
+            .map((report, index) => report.thinking_graph ? `Q${index + 1}: ${report.thinking_graph}` : '')
+            .filter(Boolean)
+            .join(' | '),
+        insight: `${correctAnswers}/${rounds.length} questions were correct. Total thinking time was ${formatTimer(totalThinkingTime)} and total solving time was ${formatTimer(totalSolvingTime)}.`,
+        improvement_rule: correctAnswers === rounds.length
+            ? 'Keep the same rhythm: think first, solve silently, then verify before uploading.'
+            : 'Keep separating thinking from solving, and spend a few extra seconds checking the final numeric answer before uploading.',
+        detailed_report: safeReports.map((report, index) => ({
+            question_number: rounds[index]?.questionNumber || index + 1,
+            insight: report?.insight || '',
+            improvement_rule: report?.improvement_rule || '',
+            detailed_analysis: report?.detailed_analysis || '',
+            time_analysis: report?.time_analysis || null,
+        })),
+        rounds,
+    };
+}
+
 export default function ThinkingSessionPage() {
-    const [uiState, setUiState] = useState('pre_session');
-    const [timer, setTimer] = useState(0);
-    const [micStatus, setMicStatus] = useState('idle');
+    const [uiStage, setUiStage] = useState('pre_session');
+    const [thinkingTimer, setThinkingTimer] = useState(0);
+    const [solvingTimer, setSolvingTimer] = useState(0);
     const [statusText, setStatusText] = useState('Idle...');
     const [sessionPhase, setSessionPhase] = useState('understanding');
     const [lifecycleState, setLifecycleState] = useState('initializing');
     const [waveform, setWaveform] = useState(() => createIdleWaveform());
     const [problemText, setProblemText] = useState('The problem will appear here when the session starts.');
     const [timelineEvents, setTimelineEvents] = useState([]);
-    const [sessionId, setSessionId] = useState(null);
     const [runtimeNote, setRuntimeNote] = useState('');
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [isIntervening, setIsIntervening] = useState(false);
     const [interventionMessage, setInterventionMessage] = useState(null);
     const [answerResult, setAnswerResult] = useState(null);
     const [isValidating, setIsValidating] = useState(false);
+    const [isEndingSession, setIsEndingSession] = useState(false);
+    const [questionNumber, setQuestionNumber] = useState(1);
+    const [completedRounds, setCompletedRounds] = useState([]);
+    const [validationState, setValidationState] = useState(null);
+    const [uploadGraceUsed, setUploadGraceUsed] = useState(0);
 
     const navigate = useNavigate();
 
     const wsRef = useRef(null);
     const heartbeatRef = useRef(null);
-    const timerRef = useRef(0);
+    const thinkingTimerRef = useRef(0);
+    const solvingTimerRef = useRef(0);
     const sessionIdRef = useRef(null);
     const sessionStartedAtRef = useRef(null);
     const chunkIndexRef = useRef(0);
@@ -108,18 +208,21 @@ export default function ThinkingSessionPage() {
     const streamingEnabledRef = useRef(false);
     const desiredMicStateRef = useRef('idle');
     const recorderMimeTypeRef = useRef('');
+    const questionFinalizedRef = useRef(false);
+    const uiStageRef = useRef('pre_session');
+    const uploadStartedAtRef = useRef(null);
 
     useEffect(() => {
-        timerRef.current = timer;
-    }, [timer]);
+        thinkingTimerRef.current = thinkingTimer;
+    }, [thinkingTimer]);
 
     useEffect(() => {
-        sessionIdRef.current = sessionId;
-    }, [sessionId]);
+        solvingTimerRef.current = solvingTimer;
+    }, [solvingTimer]);
 
     useEffect(() => {
-        desiredMicStateRef.current = micStatus;
-    }, [micStatus]);
+        uiStageRef.current = uiStage;
+    }, [uiStage]);
 
     useEffect(() => {
         if (isIntervening) {
@@ -127,23 +230,43 @@ export default function ThinkingSessionPage() {
             return;
         }
         if (isAnalyzing) {
-            setStatusText('Analyzing...');
+            setStatusText('Checking thinking...');
             return;
         }
-        if (uiState === 'completed' || uiState !== 'active') {
-            setStatusText('Idle...');
+        if (uiStage === 'thinking') {
+            setStatusText('Thinking in progress');
             return;
         }
-        setStatusText(micStatus === 'recording' ? 'Listening...' : 'Idle...');
-    }, [isAnalyzing, isIntervening, micStatus, uiState]);
+        if (uiStage === 'solving') {
+            setStatusText('Solving silently');
+            return;
+        }
+        if (uiStage === 'question_done') {
+            setStatusText('Question complete');
+            return;
+        }
+        setStatusText('Idle...');
+    }, [isAnalyzing, isIntervening, uiStage]);
 
     useEffect(() => {
-        if (uiState !== 'active') return undefined;
+        if (uiStage !== 'thinking') {
+            return undefined;
+        }
         const interval = window.setInterval(() => {
-            setTimer((current) => current + 1);
+            setThinkingTimer((current) => current + 1);
         }, 1000);
         return () => window.clearInterval(interval);
-    }, [uiState]);
+    }, [uiStage]);
+
+    useEffect(() => {
+        if (uiStage !== 'solving') {
+            return undefined;
+        }
+        const interval = window.setInterval(() => {
+            setSolvingTimer((current) => current + 1);
+        }, 1000);
+        return () => window.clearInterval(interval);
+    }, [uiStage]);
 
     useEffect(() => () => {
         cleanupAudio();
@@ -158,7 +281,8 @@ export default function ThinkingSessionPage() {
             if (current.some((event) => event.id === nextEvent.id)) {
                 return current;
             }
-            return [...current, nextEvent];
+            const next = [...current, nextEvent];
+            return next.slice(-12);
         });
     }
 
@@ -277,20 +401,19 @@ export default function ThinkingSessionPage() {
                     detail: item.payload?.detail,
                     timestamp: item.at_seconds,
                 })));
+                setValidationState(data.validation_state || null);
                 return;
             }
             if (type === 'phase_change') {
                 setSessionPhase(data.phase || 'understanding');
-                setLifecycleState(data.lifecycle_state || 'active');
-                if (data.lifecycle_state === 'closed') {
-                    setUiState('completed');
-                    setMicStatus('idle');
+                if (uiStageRef.current === 'thinking') {
+                    setLifecycleState('active');
                 }
                 return;
             }
             if (type === 'status_update') {
-                if (!isAnalyzing && !isIntervening) {
-                    setStatusText(data.status || 'Idle...');
+                if (!isAnalyzing && !isIntervening && uiStageRef.current === 'thinking') {
+                    setStatusText(data.status || 'Thinking in progress');
                 }
                 return;
             }
@@ -298,7 +421,11 @@ export default function ThinkingSessionPage() {
                 appendTimelineEvent(timelineItemFromSocket(data));
                 return;
             }
-            if (type === 'intervention') {
+            if (type === 'validation_state') {
+                setValidationState(data.validation_state || null);
+                return;
+            }
+            if (type === 'intervention' && uiStageRef.current === 'thinking') {
                 setIsIntervening(true);
                 setInterventionMessage(data.message || 'Think about your approach.');
                 appendTimelineEvent(
@@ -336,7 +463,9 @@ export default function ThinkingSessionPage() {
     }
 
     async function streamChunk(blob) {
-        if (!streamingEnabledRef.current || !sessionIdRef.current || !sessionStartedAtRef.current) return;
+        if (!streamingEnabledRef.current || !sessionIdRef.current || !sessionStartedAtRef.current || uiStageRef.current !== 'thinking') {
+            return;
+        }
         const chunkIndex = chunkIndexRef.current + 1;
         chunkIndexRef.current = chunkIndex;
         const endTime = (performance.now() - sessionStartedAtRef.current) / 1000;
@@ -389,8 +518,8 @@ export default function ThinkingSessionPage() {
 
         const mimeType = selectRecorderMimeType();
         const recorder = mimeType
-            ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 128000 })
-            : new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+            ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 160000 })
+            : new MediaRecorder(stream, { audioBitsPerSecond: 160000 });
 
         recorderMimeTypeRef.current = recorder.mimeType || mimeType;
         recorderChunksRef.current = [];
@@ -407,10 +536,10 @@ export default function ThinkingSessionPage() {
             const chunks = recorderChunksRef.current;
             recorderChunksRef.current = [];
             const blob = chunks.length > 0 ? new Blob(chunks, { type: recorder.mimeType || recorderMimeTypeRef.current || 'audio/webm' }) : null;
-            if (blob && blob.size > 0 && streamingEnabledRef.current) {
+            if (blob && blob.size > 0 && streamingEnabledRef.current && uiStageRef.current === 'thinking') {
                 await streamChunk(blob);
             }
-            if (streamingEnabledRef.current && desiredMicStateRef.current === 'recording' && mediaStreamRef.current) {
+            if (streamingEnabledRef.current && desiredMicStateRef.current === 'recording' && mediaStreamRef.current && uiStageRef.current === 'thinking') {
                 resetFeatureStats();
                 startRecorderCycle(mediaStreamRef.current);
             }
@@ -431,13 +560,14 @@ export default function ThinkingSessionPage() {
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true,
+                sampleRate: { ideal: 48000 },
             },
         });
         const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
         const audioContext = new AudioContextCtor();
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = ANALYSER_FFT_SIZE;
-        analyser.smoothingTimeConstant = 0.72;
+        analyser.smoothingTimeConstant = 0.84;
         const source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
 
@@ -454,7 +584,7 @@ export default function ThinkingSessionPage() {
 
         const draw = () => {
             const activeAnalyser = analyserRef.current;
-            if (!activeAnalyser || !streamingEnabledRef.current) return;
+            if (!activeAnalyser || !streamingEnabledRef.current || uiStageRef.current !== 'thinking') return;
             activeAnalyser.getByteFrequencyData(waveformBuffer);
             activeAnalyser.getByteTimeDomainData(timeDomainBuffer);
 
@@ -494,7 +624,7 @@ export default function ThinkingSessionPage() {
                     stats.currentSilenceSeconds = 0;
                     stats.trailingSilenceSeconds = 0;
                 } else {
-                    stats.noiseFloor = stats.noiseFloor * 0.92 + rms * 0.08;
+                    stats.noiseFloor = stats.noiseFloor * 0.96 + rms * 0.04;
                     stats.currentSilenceSeconds += deltaSeconds;
                     stats.maxSilenceSeconds = Math.max(stats.maxSilenceSeconds, stats.currentSilenceSeconds);
                     if (!stats.startedSpeaking) {
@@ -511,17 +641,41 @@ export default function ThinkingSessionPage() {
         animationFrameRef.current = window.requestAnimationFrame(draw);
     }
 
-    async function handleStartThinking() {
-        setRuntimeNote('');
-        setUiState('loading');
-        setTimer(0);
+    function resetQuestionUi() {
+        setThinkingTimer(0);
+        setSolvingTimer(0);
         setTimelineEvents([]);
-        setMicStatus('idle');
-        setLifecycleState('initializing');
-        setSessionPhase('understanding');
-        setSessionId(null);
+        setAnswerResult(null);
+        setRuntimeNote('');
         setIsAnalyzing(false);
         setIsIntervening(false);
+        setInterventionMessage(null);
+        setSessionPhase('understanding');
+        setLifecycleState('initializing');
+        setWaveform(createIdleWaveform());
+        setValidationState(null);
+        setUploadGraceUsed(0);
+        uploadStartedAtRef.current = null;
+        questionFinalizedRef.current = false;
+    }
+
+    function stopThinkingCapture() {
+        streamingEnabledRef.current = false;
+        desiredMicStateRef.current = 'idle';
+        if (recordingTimerRef.current) {
+            window.clearTimeout(recordingTimerRef.current);
+            recordingTimerRef.current = null;
+        }
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            mediaRecorderRef.current.stop();
+        }
+        cleanupAudio();
+        cleanupSocket();
+    }
+
+    async function handleStartThinking() {
+        resetQuestionUi();
+        setUiStage('loading');
         cleanupAudio();
         cleanupSocket();
 
@@ -532,66 +686,46 @@ export default function ThinkingSessionPage() {
                 body: JSON.stringify({}),
             });
             if (!response.ok) {
-                throw new Error('Unable to start the session.');
+                throw new Error('Unable to start the question.');
             }
             const session = await response.json();
-            setSessionId(session.session_id);
-            sessionIdRef.current = session.session_id;
             setProblemText(session.problem_payload?.raw_text || 'Problem unavailable.');
             setSessionPhase(session.initial_state?.phase || 'understanding');
-            setLifecycleState(session.initial_state?.lifecycle_state || 'active');
+            setLifecycleState('active');
+            setValidationState(session.initial_state?.validation_state || null);
+            sessionIdRef.current = session.session_id;
             connectSocket(session.session_id);
             sessionStartedAtRef.current = performance.now();
             chunkIndexRef.current = 0;
-            setUiState('active');
+            setUiStage('thinking');
             await initializeAudioRuntime();
-            setMicStatus('recording');
         } catch (error) {
             cleanupAudio();
             cleanupSocket();
-            setUiState('pre_session');
-            setRuntimeNote(error instanceof Error ? error.message : 'Unable to initialize the runtime.');
+            setUiStage('pre_session');
+            setRuntimeNote(error instanceof Error ? error.message : 'Unable to initialize the question.');
         }
     }
 
-    function handleToggleMic() {
-        if (uiState !== 'active' || !mediaStreamRef.current) return;
-        const recorder = mediaRecorderRef.current;
-        if (micStatus === 'recording') {
-            desiredMicStateRef.current = 'paused';
-            setMicStatus('paused');
-            if (recordingTimerRef.current) {
-                window.clearTimeout(recordingTimerRef.current);
-                recordingTimerRef.current = null;
-            }
-            if (recorder && recorder.state === 'recording') {
-                recorder.stop();
-            }
-            return;
-        }
-        if (micStatus === 'paused') {
-            desiredMicStateRef.current = 'recording';
-            resetFeatureStats();
-            setMicStatus('recording');
-            startRecorderCycle(mediaStreamRef.current);
-        }
+    function handleStartSolving() {
+        stopThinkingCapture();
+        setLifecycleState('solving');
+        setUiStage('solving');
+        setIsIntervening(false);
+        setInterventionMessage(null);
+        setStatusText('Solving silently');
     }
 
-    async function handleEndSession() {
-        if (!sessionIdRef.current) return;
+    async function finalizeCurrentQuestion({ shouldPersistRound }) {
+        if (!sessionIdRef.current || questionFinalizedRef.current) {
+            return null;
+        }
+
+        questionFinalizedRef.current = true;
+        stopThinkingCapture();
+
         const currentSessionId = sessionIdRef.current;
         try {
-            streamingEnabledRef.current = false;
-            desiredMicStateRef.current = 'idle';
-            if (recordingTimerRef.current) {
-                window.clearTimeout(recordingTimerRef.current);
-                recordingTimerRef.current = null;
-            }
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-                mediaRecorderRef.current.stop();
-            }
-            cleanupAudio();
-            setMicStatus('idle');
             await fetch(`${API_BASE_URL}/end_session`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -599,84 +733,210 @@ export default function ThinkingSessionPage() {
                     session_id: currentSessionId,
                     final_timestamps: {
                         start_time: 0,
-                        end_time: timerRef.current,
+                        end_time: thinkingTimerRef.current,
                     },
                 }),
             });
-            setLifecycleState('closed');
-            setUiState('completed');
-            // Store session id for report page
-            localStorage.setItem('mathmend_session_id', currentSessionId);
-            localStorage.setItem('mathmend_session_time', String(timerRef.current));
-        } catch {
-            setRuntimeNote('Unable to close the session cleanly.');
-        } finally {
-            cleanupSocket();
+        } catch (error) {
+            console.error('Unable to close question session', error);
         }
+
+        const round = {
+            questionNumber,
+            sessionId: currentSessionId,
+            problemText,
+            thinkingSeconds: thinkingTimerRef.current,
+            solvingSeconds: Math.max(solvingTimerRef.current - uploadGraceUsed, 0),
+            uploadGraceUsed,
+            answerResult,
+        };
+
+        if (shouldPersistRound) {
+            setCompletedRounds((current) => [...current, round]);
+            setQuestionNumber((current) => current + 1);
+        }
+
+        sessionIdRef.current = null;
+        return round;
     }
 
     async function handleUploadAnswer(file) {
-        if (!sessionIdRef.current) return;
+        if (!sessionIdRef.current || uiStage !== 'solving') return;
         setIsValidating(true);
+        setRuntimeNote('');
         try {
-            const reader = new FileReader();
-            const b64 = await new Promise((resolve, reject) => {
+            const currentSessionId = sessionIdRef.current;
+            uploadStartedAtRef.current = performance.now();
+            const imageB64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
                 reader.onloadend = () => {
                     const result = reader.result;
-                    const encoded = result.includes(',') ? result.split(',')[1] : result;
-                    resolve(encoded);
+                    if (typeof result !== 'string') {
+                        reject(new Error('Unable to read the uploaded image.'));
+                        return;
+                    }
+                    resolve(result.includes(',') ? result.split(',')[1] : result);
                 };
-                reader.onerror = () => reject(reader.error);
+                reader.onerror = () => reject(reader.error || new Error('Unable to read the uploaded image.'));
                 reader.readAsDataURL(file);
             });
+
             const response = await fetch(`${API_BASE_URL}/validate_answer`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    session_id: sessionIdRef.current,
-                    image_b64: b64,
+                    session_id: currentSessionId,
+                    image_b64: imageB64,
                 }),
             });
-            if (response.ok) {
-                const data = await response.json();
-                setAnswerResult(data);
-            } else {
-                setRuntimeNote('Answer validation failed. Try again.');
+            if (!response.ok) {
+                throw new Error('Answer validation failed.');
             }
+
+            const data = await response.json();
+            const graceUsed = Math.min(
+                UPLOAD_GRACE_SECONDS,
+                Math.max(0, Math.round((performance.now() - (uploadStartedAtRef.current || performance.now())) / 1000)),
+            );
+            setUploadGraceUsed(graceUsed);
+            setAnswerResult(data);
+            const round = await finalizeCurrentQuestion({ shouldPersistRound: false });
+            const finalRound = {
+                ...(round || {}),
+                questionNumber,
+                sessionId: round?.sessionId || currentSessionId,
+                problemText,
+                thinkingSeconds: thinkingTimerRef.current,
+                solvingSeconds: Math.max(solvingTimerRef.current - graceUsed, 0),
+                uploadGraceUsed: graceUsed,
+                answerResult: data,
+            };
+            setCompletedRounds((current) => [...current, finalRound]);
+            setQuestionNumber((current) => current + 1);
+            setUiStage('question_done');
+            setLifecycleState('completed');
         } catch (error) {
             console.error('Answer validation error:', error);
-            setRuntimeNote('Unable to validate answer.');
+            setRuntimeNote(error instanceof Error ? error.message : 'Unable to validate answer.');
         } finally {
+            uploadStartedAtRef.current = null;
             setIsValidating(false);
         }
     }
 
-    function handleViewReport() {
-        navigate('/thinking-report');
+    function handleNextQuestion() {
+        resetQuestionUi();
+        setProblemText('The problem will appear here when the session starts.');
+        setUiStage('pre_session');
+    }
+
+    async function handleEndSession() {
+        if (isEndingSession) return;
+        setIsEndingSession(true);
+        setRuntimeNote('');
+
+        try {
+            let rounds = [...completedRounds];
+
+            if (sessionIdRef.current && !questionFinalizedRef.current) {
+                const round = await finalizeCurrentQuestion({ shouldPersistRound: false });
+                if (round) {
+                    rounds = [...rounds, round];
+                }
+            }
+
+            if (rounds.length === 0) {
+                setRuntimeNote('Complete at least one question before ending the session.');
+                setIsEndingSession(false);
+                return;
+            }
+
+            const reports = await Promise.all(
+                rounds.map(async (round) => {
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/generate_report`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_id: round.sessionId }),
+                        });
+                        if (!response.ok) {
+                            return null;
+                        }
+                        return await response.json();
+                    } catch {
+                        return null;
+                    }
+                }),
+            );
+
+            const roundsWithReports = rounds.map((round, index) => ({
+                ...round,
+                report: reports[index] || null,
+            }));
+            const aggregateReport = buildAggregateReport(roundsWithReports, reports);
+            localStorage.setItem('mathmend_session_report', JSON.stringify(aggregateReport));
+            localStorage.setItem('mathmend_session_id', rounds[0].sessionId);
+            localStorage.setItem('mathmend_session_time', String(aggregateReport.total_session_time || 0));
+            navigate('/thinking-report');
+        } catch (error) {
+            console.error('Unable to end session', error);
+            setRuntimeNote('Unable to generate the final report.');
+            setIsEndingSession(false);
+        }
     }
 
     return (
         <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.16),transparent_22%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_42%,#edf3f7_100%)] px-3 py-3 text-slate-950 sm:px-4 lg:px-5">
-            <div className="mx-auto grid max-w-[1720px] gap-3 xl:h-[calc(100vh-1.5rem)] xl:grid-cols-[1.04fr_1.28fr_0.98fr]">
+            <div className="mx-auto grid max-w-[1720px] gap-3 xl:grid-cols-[1.02fr_1.18fr_0.94fr]">
                 <ProblemPanel problemText={problemText} />
                 <CognitiveIDE
-                    uiState={uiState}
-                    timer={timer}
-                    micStatus={micStatus}
-                    statusText={statusText}
+                    uiStage={uiStage}
+                    thinkingTimer={thinkingTimer}
+                    effectiveSolvingTimer={Math.max(solvingTimer - uploadGraceUsed, 0)}
+                    uploadGraceUsed={uploadGraceUsed}
                     waveform={waveform}
-                    sessionPhase={sessionPhase}
-                    lifecycleState={lifecycleState}
                     runtimeNote={runtimeNote}
-                    interventionMessage={interventionMessage}
-                    onStart={handleStartThinking}
-                    onToggleMic={handleToggleMic}
-                    onEndSession={handleEndSession}
-                    onUploadAnswer={handleUploadAnswer}
                     answerResult={answerResult}
                     isValidating={isValidating}
+                    isEndingSession={isEndingSession}
+                    onStartThinking={handleStartThinking}
+                    onStartSolving={handleStartSolving}
+                    onEndSession={handleEndSession}
+                    onUploadAnswer={handleUploadAnswer}
+                    onNextQuestion={handleNextQuestion}
                 />
-                <TimelinePanel events={timelineEvents} />
+                <TimelinePanel
+                    events={timelineEvents}
+                    validationState={validationState}
+                    sessionPhase={sessionPhase}
+                    lifecycleState={lifecycleState}
+                    statusText={statusText}
+                    uiStage={uiStage}
+                    interventionMessage={interventionMessage}
+                />
+            </div>
+
+            <div className="mx-auto mt-3 grid max-w-[1720px] gap-3 rounded-[22px] border border-slate-200/80 bg-white/88 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.06)] md:grid-cols-5">
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Question</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{Math.max(1, questionNumber - (uiStage === 'question_done' ? 1 : 0))}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Completed</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{completedRounds.length}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Phase</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{sessionPhase.replaceAll('_', ' ')}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Status</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{statusText}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Upload Grace</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{formatTimer(uploadGraceUsed)} used</p>
+                </div>
             </div>
         </div>
     );

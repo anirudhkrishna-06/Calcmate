@@ -192,6 +192,7 @@ UNCERTAINTY_MARKERS: tuple[str, ...] = (
     "i think",
     "probably",
     "not sure",
+    "not very confident",
     "perhaps",
     "could be",
     "might",
@@ -455,7 +456,7 @@ def classify_semantic_intent(
         )
 
     alignment = signals.problem_alignment_score
-    has_problem_context = alignment >= 0.22 or len(signals.problem_keyword_hits) >= 2
+    has_problem_context = alignment >= 0.14 or len(signals.problem_keyword_hits) >= 1
 
     if signals.error_markers and len(signals.error_markers) >= 1:
         confidence = 0.82 + min(0.08, alignment * 0.1)
@@ -535,6 +536,16 @@ def classify_semantic_intent(
             certainty=_certainty_from(confidence, alignment, False),
             semantic_signals=signals,
             rationale="The learner appears to be framing or understanding the problem.",
+        )
+
+    if len(signals.problem_keyword_hits) >= 1 and alignment >= 0.12:
+        confidence = 0.58 + min(0.16, alignment * 0.24)
+        return SemanticIntentResult(
+            intent=CognitiveIntent.PARAMETER_RECOGNITION,
+            confidence=round(min(confidence, 0.84), 3),
+            certainty=_certainty_from(confidence, alignment, False),
+            semantic_signals=signals,
+            rationale="A partial problem keyword hit suggests the learner is referencing a core quantity from the question.",
         )
 
     if acoustic_profile.hesitation_score >= 0.82 and signals.uncertainty and alignment < 0.16:

@@ -417,6 +417,7 @@ class SessionState(BaseModel):
     timeline: list[TimelineEvent] = Field(default_factory=list)
     chunks: list[CognitiveChunk] = Field(default_factory=list)
     metrics: dict[str, float] = Field(default_factory=dict)
+    cached_report: dict[str, Any] | None = None
     deviation_score: float = 0.0
     intervention_count: int = 0
     created_at: datetime = Field(default_factory=utc_now)

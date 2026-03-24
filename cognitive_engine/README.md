@@ -97,6 +97,17 @@ GEMINI_PARSER_MODEL=gemini-2.0-flash
 GEMINI_PARSER_TIMEOUT_SECONDS=1.4
 ```
 
+## Answer validation setup
+
+Answer validation prefers a separate Gemini key so OCR checks do not fight with report generation traffic.
+If `GEMINI3_API_KEY` is set, it will be used first for answer validation, then `GEMINI2_API_KEY` as fallback.
+
+```env
+GEMINI3_API_KEY=
+GEMINI3_MODEL=gemini-2.0-flash
+GEMINI3_TIMEOUT_SECONDS=10.0
+```
+
 ## Semantic rules
 
 Customize rule-based intent mapping in:
