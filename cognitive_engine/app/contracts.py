@@ -580,6 +580,7 @@ class SessionReport(BaseModel):
     total_chunks: int = 0
     total_interventions: int = 0
     validation_state: ValidationState | None = None
+    predictive_analytics: dict[str, Any] | None = None
     answer_result: dict[str, Any] | None = None
     generated_at: datetime = Field(default_factory=utc_now)
 

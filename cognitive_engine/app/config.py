@@ -64,8 +64,16 @@ class Gemini3Settings(BaseModel):
 class OllamaSettings(BaseModel):
     enabled: bool = False
     base_url: str = "http://localhost:11434/v1"
-    model: str = "qwen3.5:397b-cloud"
+    model: str = "qwen2.5:7b"
     timeout_seconds: float = 20.0
+
+
+class PredictiveAnalyticsSettings(BaseModel):
+    enabled: bool = True
+    models_dir: Path = ROOT_DIR / "data_models"
+    regression_model_filename: str = "regression_model.pkl"
+    classification_model_filename: str = "classification_model.pkl"
+    early_chunk_count: int = 5
 
 
 class EngineSettings(BaseModel):
@@ -75,6 +83,7 @@ class EngineSettings(BaseModel):
     gemini2: Gemini2Settings
     gemini3: Gemini3Settings
     ollama: OllamaSettings
+    predictive_analytics: PredictiveAnalyticsSettings
 
 
 @lru_cache(maxsize=1)
@@ -131,6 +140,19 @@ def get_settings() -> EngineSettings:
         model=os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud"),
         timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "20.0")),
     )
+    predictive_analytics = PredictiveAnalyticsSettings(
+        enabled=os.getenv("PREDICTIVE_ANALYTICS_ENABLED", "true").lower() == "true",
+        models_dir=Path(os.getenv("PREDICTIVE_MODELS_DIR", str(ROOT_DIR / "data_models"))),
+        regression_model_filename=os.getenv(
+            "PREDICTIVE_REGRESSION_MODEL_FILENAME",
+            "regression_model.pkl",
+        ),
+        classification_model_filename=os.getenv(
+            "PREDICTIVE_CLASSIFICATION_MODEL_FILENAME",
+            "classification_model.pkl",
+        ),
+        early_chunk_count=int(os.getenv("PREDICTIVE_EARLY_CHUNK_COUNT", "5")),
+    )
 
     return EngineSettings(
         deepgram=deepgram,
@@ -139,4 +161,5 @@ def get_settings() -> EngineSettings:
         gemini2=gemini2,
         gemini3=gemini3,
         ollama=ollama,
+        predictive_analytics=predictive_analytics,
     )

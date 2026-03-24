@@ -42,6 +42,7 @@ from .contracts import (
 )
 from .session_store import store
 from .state import build_timeline_metrics, default_problem_payload, make_session_state, resolve_phase
+from .predictive_analytics import predictive_analytics_service
 from .strategy_validation.solution_graph import build_enriched_solution_graph
 from .strategy_validation.gemini_enhancer import gemini_graph_enhancer
 from .strategy_validation.validation_logger import validation_logger
@@ -221,8 +222,14 @@ class SessionOrchestrator:
         thinking_graph = report_generator_agent._build_thinking_graph(path)
 
         time_analysis = report_generator_agent._build_time_analysis(state, metrics)
+        predictive_analytics = predictive_analytics_service.build_report_payload(state)
         insight_payload = await report_generator_agent._generate_gemini_insight(
-            state, thinking_graph, metrics, vs, time_analysis
+            state,
+            thinking_graph,
+            metrics,
+            vs,
+            time_analysis,
+            predictive_analytics,
         )
 
         report = {
@@ -236,6 +243,7 @@ class SessionOrchestrator:
             "total_chunks": len(state.chunks),
             "total_interventions": state.intervention_count,
             "validation_state": vs.model_dump(mode="json") if vs else None,
+            "predictive_analytics": predictive_analytics,
             "answer_result": None,
         }
         state.cached_report = report

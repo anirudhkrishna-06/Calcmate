@@ -22,6 +22,12 @@ function formatTimer(totalSeconds) {
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
+function labelFromProbability(probability) {
+    if (probability >= 0.45) return 'high';
+    if (probability >= 0.2) return 'moderate';
+    return 'low';
+}
+
 function normaliseCategory(category) {
     if (['understanding', 'parameter', 'strategy', 'delay', 'deviation', 'execution', 'intervention', 'signal', 'system'].includes(category)) {
         return category;
@@ -129,6 +135,48 @@ function buildAggregateReport(rounds, reports) {
         validationState.oscillation_index = Number((validationState.oscillation_index / safeReports.length).toFixed(3));
     }
 
+    const predictiveReports = safeReports
+        .map((report) => report.predictive_analytics)
+        .filter((item) => item?.available);
+    const predictiveAnalytics = predictiveReports.length > 0
+        ? (() => {
+            const totals = predictiveReports.reduce((acc, item) => {
+                acc.predicted += item.predicted_total_time_seconds || 0;
+                acc.observed += item.observed_total_time_seconds || 0;
+                acc.confusion += item.confusion_probability || 0;
+                if ((item.confusion_probability || 0) >= 0.45) {
+                    acc.highRisk += 1;
+                }
+                return acc;
+            }, {
+                predicted: 0,
+                observed: 0,
+                confusion: 0,
+                highRisk: 0,
+            });
+
+            const averageConfusion = Number((totals.confusion / predictiveReports.length).toFixed(4));
+            return {
+                enabled: true,
+                available: true,
+                model_status: 'ready',
+                predicted_total_time_seconds: Number(totals.predicted.toFixed(2)),
+                observed_total_time_seconds: Number(totals.observed.toFixed(2)),
+                time_delta_seconds: Number((totals.observed - totals.predicted).toFixed(2)),
+                confusion_probability: averageConfusion,
+                confusion_risk_level: labelFromProbability(averageConfusion),
+                question_count: predictiveReports.length,
+                high_risk_questions: totals.highRisk,
+                summary: `Across ${predictiveReports.length} report${predictiveReports.length === 1 ? '' : 's'}, the model expected ${formatTimer(Math.round(totals.predicted))} and observed ${formatTimer(Math.round(totals.observed))}. Average confusion risk was ${(averageConfusion * 100).toFixed(1)}%.`,
+            };
+        })()
+        : {
+            enabled: true,
+            available: false,
+            model_status: 'unavailable',
+            summary: 'Predictive analytics was not available for the completed questions.',
+        };
+
     return {
         session_type: 'aggregate',
         generated_at: new Date().toISOString(),
@@ -160,7 +208,9 @@ function buildAggregateReport(rounds, reports) {
             improvement_rule: report?.improvement_rule || '',
             detailed_analysis: report?.detailed_analysis || '',
             time_analysis: report?.time_analysis || null,
+            predictive_analytics: report?.predictive_analytics || null,
         })),
+        predictive_analytics: predictiveAnalytics,
         rounds,
     };
 }

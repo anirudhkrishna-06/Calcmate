@@ -29,6 +29,7 @@ from .deepgram_client import transcription_client
 from .llm_refiner import llm_refinement_client
 from .problem_intelligence import problem_structuring_pipeline
 from .problem_intelligence.concept_mapper import detect_concepts_from_text
+from .predictive_analytics import predictive_analytics_service
 from .semantic_rules import classify_semantic_intent
 from .state import (
     apply_context_refinement,
@@ -725,13 +726,21 @@ class ReportGeneratorAgent:
         vs = session_state.validation_state
         path = session_state.cognitive_path
         metrics = build_timeline_metrics(session_state)
+        predictive_analytics = predictive_analytics_service.build_report_payload(
+            session_state
+        )
 
         # Build thinking graph string from cognitive path
         thinking_graph = self._build_thinking_graph(path)
 
         time_analysis = self._build_time_analysis(session_state, metrics)
         insight_payload = await self._generate_gemini_insight(
-            session_state, thinking_graph, metrics, vs, time_analysis
+            session_state,
+            thinking_graph,
+            metrics,
+            vs,
+            time_analysis,
+            predictive_analytics,
         )
 
         report: dict = {
@@ -746,6 +755,7 @@ class ReportGeneratorAgent:
             "time_analysis": time_analysis,
             "timeline_metrics": metrics.model_dump(mode="json"),
             "validation_state": vs.model_dump(mode="json") if vs else None,
+            "predictive_analytics": predictive_analytics,
         }
 
         logger.info(
@@ -839,7 +849,13 @@ class ReportGeneratorAgent:
         return "\n".join(digest_lines) if digest_lines else "No chunk timeline available."
 
     async def _generate_gemini_insight(
-        self, session_state, thinking_graph: str, metrics, vs, time_analysis: dict
+        self,
+        session_state,
+        thinking_graph: str,
+        metrics,
+        vs,
+        time_analysis: dict,
+        predictive_analytics: dict,
     ) -> dict:
         """Use Gemini only to generate detailed reasoning analysis for one question."""
         from .config import get_settings
@@ -860,6 +876,7 @@ class ReportGeneratorAgent:
             f"Thinking path: {thinking_graph}\n"
             f"Timeline metrics: {metrics.model_dump(mode='json')}\n"
             f"Time analysis: {time_analysis}\n"
+            f"Predictive analytics: {predictive_analytics}\n"
             f"Interventions needed: {session_state.intervention_count}\n"
             f"Alignment score: {vs.path_alignment_score:.2f}\n"
             f"Progress: {vs.progress_ratio:.0%}\n\n"
@@ -870,7 +887,13 @@ class ReportGeneratorAgent:
         )
 
         if not any(api_key for _, api_key, _, _ in candidates):
-            return self._fallback_insight(session_state, thinking_graph, vs, time_analysis)
+            return self._fallback_insight(
+                session_state,
+                thinking_graph,
+                vs,
+                time_analysis,
+                predictive_analytics,
+            )
 
         for provider, api_key, model, timeout_seconds in candidates:
             if not api_key:
@@ -909,9 +932,22 @@ class ReportGeneratorAgent:
             except Exception as exc:
                 logger.warning("Gemini insight generation failed | provider=%s error=%s", provider, exc)
 
-        return self._fallback_insight(session_state, thinking_graph, vs, time_analysis)
+        return self._fallback_insight(
+            session_state,
+            thinking_graph,
+            vs,
+            time_analysis,
+            predictive_analytics,
+        )
 
-    def _fallback_insight(self, session_state, thinking_graph: str, vs, time_analysis: dict) -> dict:
+    def _fallback_insight(
+        self,
+        session_state,
+        thinking_graph: str,
+        vs,
+        time_analysis: dict,
+        predictive_analytics: dict,
+    ) -> dict:
         """Rule-based fallback when Gemini is unavailable."""
         if vs.progress_ratio >= 0.8:
             insight = "You made excellent progress through the solution, demonstrating strong problem-solving skills."
@@ -941,7 +977,8 @@ class ReportGeneratorAgent:
             f"{time_analysis['execution_time_seconds']:.1f}s, and verification took "
             f"{time_analysis['verification_time_seconds']:.1f}s. The longest silence was "
             f"{time_analysis['longest_silence_seconds']:.1f}s, and interventions happened at "
-            f"{time_analysis['intervention_timestamps'] or 'no intervention points'}."
+            f"{time_analysis['intervention_timestamps'] or 'no intervention points'}. "
+            f"{predictive_analytics.get('summary', '')}"
         )
 
         return {

@@ -92,6 +92,13 @@ export default function ThinkingReportPage() {
     const totalQuestions = report?.total_questions || rounds.length || 1;
     const correctAnswers = report?.correct_answers ?? rounds.filter((round) => round.answerResult?.correct).length;
     const detailedReports = report?.detailed_report || [];
+    const predictive = report?.predictive_analytics || null;
+    const predictiveAvailable = Boolean(predictive?.available);
+    const confusionRiskTone = predictive?.confusion_risk_level === 'high'
+        ? 'bg-rose-50 text-rose-700 border-rose-200'
+        : predictive?.confusion_risk_level === 'moderate'
+            ? 'bg-amber-50 text-amber-700 border-amber-200'
+            : 'bg-emerald-50 text-emerald-700 border-emerald-200';
 
     const scores = [
         {
@@ -246,6 +253,59 @@ export default function ThinkingReportPage() {
                                 </div>
                             </motion.div>
 
+                            <motion.div
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: 0.88 }}
+                                className="mt-8 rounded-2xl border border-sky-100 bg-sky-50/70 p-5"
+                            >
+                                <div className="flex items-center gap-2 mb-3">
+                                    <BarChart3 size={18} className="text-sky-600" />
+                                    <span className="font-bold text-sky-800 text-sm">Predictive Analytics</span>
+                                </div>
+                                <p className="text-sm leading-6 text-sky-950">
+                                    {predictive?.summary || 'Predictive analytics was not available for this report.'}
+                                </p>
+
+                                {predictiveAvailable && (
+                                    <>
+                                        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                            <div className="rounded-xl bg-white/90 p-4">
+                                                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-sky-500">Predicted Time</p>
+                                                <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(Math.round(predictive.predicted_total_time_seconds || 0))}</p>
+                                            </div>
+                                            <div className="rounded-xl bg-white/90 p-4">
+                                                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-sky-500">Observed Time</p>
+                                                <p className="mt-2 text-sm font-bold text-gray-900">{formatTime(Math.round(predictive.observed_total_time_seconds || 0))}</p>
+                                            </div>
+                                            <div className="rounded-xl bg-white/90 p-4">
+                                                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-sky-500">Confusion Risk</p>
+                                                <p className="mt-2 text-sm font-bold text-gray-900">{((predictive.confusion_probability || 0) * 100).toFixed(1)}%</p>
+                                            </div>
+                                            <div className="rounded-xl bg-white/90 p-4">
+                                                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-sky-500">Pace Signal</p>
+                                                <p className="mt-2 text-sm font-bold capitalize text-gray-900">{String(predictive.pace_label || 'n/a').replaceAll('_', ' ')}</p>
+                                            </div>
+                                        </div>
+
+                                        <div className={`mt-4 inline-flex rounded-full border px-3 py-1 text-xs font-bold ${confusionRiskTone}`}>
+                                            {String(predictive.confusion_risk_level || 'low').toUpperCase()} RISK
+                                        </div>
+
+                                        {Array.isArray(predictive.highlights) && predictive.highlights.length > 0 && (
+                                            <div className="mt-4 rounded-2xl border border-sky-100 bg-white/80 p-4">
+                                                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-sky-700">Model Highlights</p>
+                                                <div className="mt-3 space-y-2">
+                                                    {predictive.highlights.map((item, index) => (
+                                                        <p key={`${item}-${index}`} className="text-sm leading-6 text-gray-700">{item}</p>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </motion.div>
+
                             {rounds.length > 0 && (
                                 <motion.div
                                     initial={{ opacity: 0, y: 10 }}
@@ -305,6 +365,13 @@ export default function ThinkingReportPage() {
                                                             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-indigo-500">Expected</p>
                                                             <p className="mt-2 text-sm font-bold text-gray-900">{round.answerResult?.expected_answer || 'N/A'}</p>
                                                         </div>
+                                                    </div>
+                                                )}
+
+                                                {round.report?.predictive_analytics?.available && (
+                                                    <div className="mt-4 rounded-2xl border border-sky-100 bg-sky-50/70 p-4">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-sky-700">Question Prediction Layer</p>
+                                                        <p className="mt-3 text-sm leading-7 text-sky-950">{round.report.predictive_analytics.summary}</p>
                                                     </div>
                                                 )}
 
