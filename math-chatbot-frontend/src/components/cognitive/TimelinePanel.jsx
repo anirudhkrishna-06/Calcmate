@@ -78,7 +78,9 @@ export default function TimelinePanel({ events }) {
                                                     <h3 className="text-sm font-semibold text-slate-900">{event.title}</h3>
                                                     <span className="font-mono text-xs text-slate-400">{event.timeLabel}</span>
                                                 </div>
-                                                <p className="mt-2 text-sm leading-6 text-slate-500">{event.detail}</p>
+                                                {event.detail && (
+                                                    <p className="mt-2 text-[13px] leading-6 text-slate-500 italic">{event.detail}</p>
+                                                )}
                                             </div>
                                         </motion.div>
                                     );

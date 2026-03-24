@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import ProblemPanel from '../components/cognitive/ProblemPanel';
 import CognitiveIDE from '../components/cognitive/CognitiveIDE';
 import TimelinePanel from '../components/cognitive/TimelinePanel';
@@ -83,6 +84,11 @@ export default function ThinkingSessionPage() {
     const [runtimeNote, setRuntimeNote] = useState('');
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [isIntervening, setIsIntervening] = useState(false);
+    const [interventionMessage, setInterventionMessage] = useState(null);
+    const [answerResult, setAnswerResult] = useState(null);
+    const [isValidating, setIsValidating] = useState(false);
+
+    const navigate = useNavigate();
 
     const wsRef = useRef(null);
     const heartbeatRef = useRef(null);
@@ -294,11 +300,12 @@ export default function ThinkingSessionPage() {
             }
             if (type === 'intervention') {
                 setIsIntervening(true);
+                setInterventionMessage(data.message || 'Think about your approach.');
                 appendTimelineEvent(
                     timelineItemFromSocket({
                         event_id: `intervention-${data.timestamp}`,
                         category: 'intervention',
-                        message: 'Intervention triggered',
+                        message: 'Cognitive Coach',
                         detail: data.message,
                         timestamp: data.timestamp,
                     }),
@@ -308,7 +315,8 @@ export default function ThinkingSessionPage() {
                 }
                 interventionTimeoutRef.current = window.setTimeout(() => {
                     setIsIntervening(false);
-                }, 1400);
+                    setInterventionMessage(null);
+                }, 5000);
             }
         };
         socket.onopen = () => {
@@ -571,6 +579,7 @@ export default function ThinkingSessionPage() {
 
     async function handleEndSession() {
         if (!sessionIdRef.current) return;
+        const currentSessionId = sessionIdRef.current;
         try {
             streamingEnabledRef.current = false;
             desiredMicStateRef.current = 'idle';
@@ -587,7 +596,7 @@ export default function ThinkingSessionPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    session_id: sessionIdRef.current,
+                    session_id: currentSessionId,
                     final_timestamps: {
                         start_time: 0,
                         end_time: timerRef.current,
@@ -596,11 +605,54 @@ export default function ThinkingSessionPage() {
             });
             setLifecycleState('closed');
             setUiState('completed');
+            // Store session id for report page
+            localStorage.setItem('mathmend_session_id', currentSessionId);
+            localStorage.setItem('mathmend_session_time', String(timerRef.current));
         } catch {
             setRuntimeNote('Unable to close the session cleanly.');
         } finally {
             cleanupSocket();
         }
+    }
+
+    async function handleUploadAnswer(file) {
+        if (!sessionIdRef.current) return;
+        setIsValidating(true);
+        try {
+            const reader = new FileReader();
+            const b64 = await new Promise((resolve, reject) => {
+                reader.onloadend = () => {
+                    const result = reader.result;
+                    const encoded = result.includes(',') ? result.split(',')[1] : result;
+                    resolve(encoded);
+                };
+                reader.onerror = () => reject(reader.error);
+                reader.readAsDataURL(file);
+            });
+            const response = await fetch(`${API_BASE_URL}/validate_answer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: sessionIdRef.current,
+                    image_b64: b64,
+                }),
+            });
+            if (response.ok) {
+                const data = await response.json();
+                setAnswerResult(data);
+            } else {
+                setRuntimeNote('Answer validation failed. Try again.');
+            }
+        } catch (error) {
+            console.error('Answer validation error:', error);
+            setRuntimeNote('Unable to validate answer.');
+        } finally {
+            setIsValidating(false);
+        }
+    }
+
+    function handleViewReport() {
+        navigate('/thinking-report');
     }
 
     return (
@@ -616,9 +668,13 @@ export default function ThinkingSessionPage() {
                     sessionPhase={sessionPhase}
                     lifecycleState={lifecycleState}
                     runtimeNote={runtimeNote}
+                    interventionMessage={interventionMessage}
                     onStart={handleStartThinking}
                     onToggleMic={handleToggleMic}
                     onEndSession={handleEndSession}
+                    onUploadAnswer={handleUploadAnswer}
+                    answerResult={answerResult}
+                    isValidating={isValidating}
                 />
                 <TimelinePanel events={timelineEvents} />
             </div>

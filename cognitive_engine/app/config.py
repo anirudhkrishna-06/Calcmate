@@ -45,12 +45,22 @@ class GeminiSettings(BaseModel):
     model: str = "gemini-2.0-flash"
     base_url_template: str = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     timeout_seconds: float = 1.4
+    graph_enhancement_enabled: bool = False
+    graph_enhancement_timeout_seconds: float = 8.0
+
+
+class Gemini2Settings(BaseModel):
+    """Second Gemini key — used exclusively for report generation and answer validation."""
+    api_key: str | None = None
+    model: str = "gemini-2.0-flash"
+    timeout_seconds: float = 10.0
 
 
 class EngineSettings(BaseModel):
     deepgram: DeepgramSettings
     llm: LLMRefinementSettings
     gemini: GeminiSettings
+    gemini2: Gemini2Settings
 
 
 @lru_cache(maxsize=1)
@@ -87,5 +97,12 @@ def get_settings() -> EngineSettings:
         api_key=os.getenv("GEMINI_API_KEY"),
         model=os.getenv("GEMINI_PARSER_MODEL", "gemini-2.0-flash"),
         timeout_seconds=float(os.getenv("GEMINI_PARSER_TIMEOUT_SECONDS", "1.4")),
+        graph_enhancement_enabled=os.getenv("GEMINI_GRAPH_ENHANCEMENT_ENABLED", "false").lower() == "true",
+        graph_enhancement_timeout_seconds=float(os.getenv("GEMINI_GRAPH_ENHANCEMENT_TIMEOUT_SECONDS", "8.0")),
     )
-    return EngineSettings(deepgram=deepgram, llm=llm, gemini=gemini)
+    gemini2 = Gemini2Settings(
+        api_key=os.getenv("GEMINI2_API_KEY"),
+        model=os.getenv("GEMINI2_MODEL", "gemini-2.0-flash"),
+        timeout_seconds=float(os.getenv("GEMINI2_TIMEOUT_SECONDS", "10.0")),
+    )
+    return EngineSettings(deepgram=deepgram, llm=llm, gemini=gemini, gemini2=gemini2)

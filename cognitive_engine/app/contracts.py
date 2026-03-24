@@ -88,6 +88,11 @@ class EngineEventType(str, Enum):
     STATUS_UPDATED = "STATUS_UPDATED"
     PHASE_TRANSITION_SUGGESTED = "PHASE_TRANSITION_SUGGESTED"
     AGENT_FAILED = "AGENT_FAILED"
+    PATH_UPDATE = "PATH_UPDATE"
+    DELAY_DETECTED = "DELAY_DETECTED"
+    INEFFICIENCY_DETECTED = "INEFFICIENCY_DETECTED"
+    PATH_PROGRESS = "PATH_PROGRESS"
+    VALIDATION_STATE_UPDATED = "VALIDATION_STATE_UPDATED"
 
 
 class TimestampRange(BaseModel):
@@ -229,6 +234,101 @@ class ProblemStructure(BaseModel):
     keyword_bank: list[str] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Phase 7A — Strategy Validation Data Models
+# ---------------------------------------------------------------------------
+
+class DeviationType(str, Enum):
+    HARD_DEVIATION = "hard_deviation"
+    SOFT_DEVIATION = "soft_deviation"
+    TEMPORAL_DEVIATION = "temporal_deviation"
+
+
+class SolutionGraphNode(BaseModel):
+    node_id: str
+    label: str
+    node_type: str = Field(..., description="concept | operation | inference | step | equation | method")
+    priority: str = Field(default="optional", description="critical | optional")
+    expected_order: int = Field(default=0, description="Expected position in optimal solving sequence")
+    expected_time_weight: float = Field(default=1.0, description="Relative expected time for this step")
+    prerequisites: list[str] = Field(default_factory=list, description="Node IDs that must be visited before this node")
+    method_name: str | None = Field(default=None, description="Method this node belongs to")
+    keywords: list[str] = Field(default_factory=list, description="Keywords that map transcript content to this node")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SolutionGraph(BaseModel):
+    nodes: list[SolutionGraphNode] = Field(default_factory=list)
+    edges: dict[str, list[str]] = Field(default_factory=dict, description="Adjacency list: node_id -> [target_node_ids]")
+    optimal_paths: list[list[str]] = Field(default_factory=list, description="Ordered node_id sequences for optimal methods")
+    alternative_paths: list[list[str]] = Field(default_factory=list, description="Node_id sequences for valid but non-optimal methods")
+    all_node_ids: set[str] = Field(default_factory=set, description="Fast lookup set of all valid node IDs")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def get_node(self, node_id: str) -> "SolutionGraphNode | None":
+        for node in self.nodes:
+            if node.node_id == node_id:
+                return node
+        return None
+
+    def is_valid_transition(self, from_id: str, to_id: str) -> bool:
+        return to_id in self.edges.get(from_id, [])
+
+    def is_on_graph(self, node_id: str) -> bool:
+        return node_id in self.all_node_ids
+
+
+class CognitivePathNode(BaseModel):
+    node_label: str = Field(..., description="Human-readable label e.g. 'compute_semiperimeter', 'off_graph'")
+    mapped_graph_node_id: str | None = Field(default=None, description="ID of matched SolutionGraphNode, None if off-graph")
+    source_chunk_id: str = Field(..., description="Chunk that produced this node")
+    timestamp: float = Field(..., description="Session-relative time in seconds")
+    confidence_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    intent: CognitiveIntent = CognitiveIntent.UNKNOWN
+    is_on_graph: bool = False
+    node_type: str = "unknown"
+
+
+class CognitivePathTransition(BaseModel):
+    from_node: str
+    to_node: str
+    from_graph_id: str | None = None
+    to_graph_id: str | None = None
+    time_delta: float = 0.0
+    is_valid: bool = False
+
+
+class CognitivePath(BaseModel):
+    nodes: list[CognitivePathNode] = Field(default_factory=list)
+    transitions: list[CognitivePathTransition] = Field(default_factory=list)
+
+    def node_labels(self) -> list[str]:
+        return [n.node_label for n in self.nodes]
+
+    def graph_node_ids(self) -> list[str | None]:
+        return [n.mapped_graph_node_id for n in self.nodes]
+
+    def on_graph_count(self) -> int:
+        return sum(1 for n in self.nodes if n.is_on_graph)
+
+    def off_graph_count(self) -> int:
+        return sum(1 for n in self.nodes if not n.is_on_graph)
+
+
+class ValidationState(BaseModel):
+    path_alignment_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    deviation_score: float = Field(default=0.0, ge=0.0)
+    delay_score: float = Field(default=0.0, ge=0.0)
+    inefficiency_score: float = Field(default=0.0, ge=0.0)
+    oscillation_index: float = Field(default=0.0, ge=0.0)
+    nodes_visited: int = 0
+    on_graph_nodes: int = 0
+    off_graph_nodes: int = 0
+    progress_ratio: float = Field(default=0.0, ge=0.0, le=1.0, description="Fraction of optimal path completed")
+    active_deviations: list[str] = Field(default_factory=list, description="Current active deviation reasons")
+
+
 class ContextRefinementResult(BaseModel):
     refined_intent: CognitiveIntent = CognitiveIntent.UNKNOWN
     confidence: float = 0.0
@@ -311,6 +411,9 @@ class SessionState(BaseModel):
     phase: SessionPhase = SessionPhase.UNDERSTANDING
     problem_payload: ProblemPayload | None = None
     problem_structure: ProblemStructure | None = None
+    solution_graph: SolutionGraph | None = None
+    cognitive_path: CognitivePath = Field(default_factory=CognitivePath)
+    validation_state: ValidationState = Field(default_factory=ValidationState)
     timeline: list[TimelineEvent] = Field(default_factory=list)
     chunks: list[CognitiveChunk] = Field(default_factory=list)
     metrics: dict[str, float] = Field(default_factory=dict)
@@ -459,3 +562,37 @@ class WebSocketEnvelope(BaseModel):
     type: str
     data: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=utc_now)
+
+
+class InterventionType(str, Enum):
+    PROMPT = "prompt"
+    REDIRECT = "redirect"
+    HINT = "hint"
+
+
+class SessionReport(BaseModel):
+    session_id: str
+    timeline_metrics: TimelineMetrics
+    thinking_graph: str = ""
+    insight: str = ""
+    improvement_rule: str = ""
+    total_chunks: int = 0
+    total_interventions: int = 0
+    validation_state: ValidationState | None = None
+    answer_result: dict[str, Any] | None = None
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class ValidateAnswerRequest(BaseModel):
+    session_id: str
+    image_b64: str
+
+
+class ValidateAnswerResponse(BaseModel):
+    session_id: str
+    correct: bool
+    extracted_answer: str = ""
+    expected_answer: str = ""
+    ocr_text: str = ""
+    explanation: str = ""
+

@@ -2,6 +2,8 @@ import React from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
     BrainCircuit,
+    Camera,
+    CheckCircle2,
     Loader2,
     Mic,
     MicOff,
@@ -9,6 +11,7 @@ import {
     Play,
     Radio,
     Square,
+    XCircle,
 } from 'lucide-react';
 
 const stateCopy = {
@@ -30,7 +33,7 @@ const stateCopy = {
     completed: {
         eyebrow: 'Session Closed',
         title: 'Thinking session complete',
-        body: 'The runtime has closed the session and preserved the cognitive trace for reporting.',
+        body: 'Upload your answer to validate, or view your session report.',
     },
 };
 
@@ -49,18 +52,31 @@ export default function CognitiveIDE({
     sessionPhase,
     lifecycleState,
     runtimeNote,
+    interventionMessage,
     onStart,
     onToggleMic,
     onEndSession,
+    onUploadAnswer,
+    answerResult,
+    isValidating,
 }) {
     const copy = stateCopy[uiState];
     const isLoading = uiState === 'loading';
     const isActive = uiState === 'active';
+    const fileInputRef = React.useRef(null);
 
     const micButtonLabel =
         micStatus === 'recording' ? 'Pause Listening' : micStatus === 'paused' ? 'Resume Listening' : 'Activate Microphone';
 
     const MicIcon = micStatus === 'recording' ? PauseCircle : micStatus === 'paused' ? Play : Mic;
+
+    const handleFileSelect = (e) => {
+        const file = e.target.files?.[0];
+        if (file && onUploadAnswer) {
+            onUploadAnswer(file);
+        }
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
 
     return (
         <section className="relative overflow-hidden rounded-[32px] border border-slate-900/10 bg-[radial-gradient(circle_at_top,rgba(244,63,94,0.08),transparent_34%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(15,23,42,0.93))] p-6 text-white shadow-[0_30px_100px_rgba(15,23,42,0.35)] xl:h-[calc(100vh-3rem)]">
@@ -167,12 +183,77 @@ export default function CognitiveIDE({
                                     <BrainCircuit size={40} className="text-emerald-300" />
                                 </div>
                                 <p className="mx-auto mt-6 max-w-md text-base leading-7 text-slate-300">{copy.body}</p>
+
+                                {/* Answer Upload Section */}
+                                <div className="mt-8">
+                                    <input
+                                        type="file"
+                                        ref={fileInputRef}
+                                        onChange={handleFileSelect}
+                                        accept="image/*"
+                                        className="hidden"
+                                    />
+                                    {!answerResult && (
+                                        <button
+                                            onClick={() => fileInputRef.current?.click()}
+                                            disabled={isValidating}
+                                            className="inline-flex items-center gap-3 rounded-full border border-amber-300/40 bg-amber-300/10 px-6 py-3 text-sm font-semibold uppercase tracking-[0.22em] text-amber-200 transition hover:bg-amber-300/20 disabled:opacity-50"
+                                        >
+                                            {isValidating ? (
+                                                <>
+                                                    <Loader2 size={18} className="animate-spin" />
+                                                    Validating...
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Camera size={18} />
+                                                    Upload Answer
+                                                </>
+                                            )}
+                                        </button>
+                                    )}
+
+                                    {/* Answer Result */}
+                                    {answerResult && (
+                                        <motion.div
+                                            initial={{ opacity: 0, scale: 0.9 }}
+                                            animate={{ opacity: 1, scale: 1 }}
+                                            className={`mt-4 mx-auto max-w-sm rounded-2xl border p-5 ${
+                                                answerResult.correct
+                                                    ? 'border-emerald-300/30 bg-emerald-300/10'
+                                                    : 'border-rose-300/30 bg-rose-300/10'
+                                            }`}
+                                        >
+                                            <div className="flex items-center gap-3 justify-center">
+                                                {answerResult.correct ? (
+                                                    <CheckCircle2 size={28} className="text-emerald-300" />
+                                                ) : (
+                                                    <XCircle size={28} className="text-rose-300" />
+                                                )}
+                                                <span className={`text-lg font-bold ${answerResult.correct ? 'text-emerald-200' : 'text-rose-200'}`}>
+                                                    {answerResult.correct ? 'Correct!' : 'Incorrect'}
+                                                </span>
+                                            </div>
+                                            {answerResult.extracted_answer && (
+                                                <p className="mt-3 text-sm text-slate-300">
+                                                    Your answer: <span className="font-mono text-white">{answerResult.extracted_answer}</span>
+                                                </p>
+                                            )}
+                                            {answerResult.expected_answer && !answerResult.correct && (
+                                                <p className="mt-1 text-sm text-slate-300">
+                                                    Expected: <span className="font-mono text-white">{answerResult.expected_answer}</span>
+                                                </p>
+                                            )}
+                                        </motion.div>
+                                    )}
+                                </div>
                             </motion.div>
                         )}
                     </AnimatePresence>
                 </div>
             </div>
 
+            {/* Loading Overlay */}
             <AnimatePresence>
                 {isLoading && (
                     <motion.div
@@ -187,6 +268,32 @@ export default function CognitiveIDE({
                             </div>
                             <h2 className="mt-6 text-2xl font-semibold text-white">Initializing cognitive engine...</h2>
                             <p className="mt-3 text-sm leading-7 text-slate-300">{copy.body}</p>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Intervention Popup — floating Socratic prompt */}
+            <AnimatePresence>
+                {interventionMessage && (
+                    <motion.div
+                        key="intervention-popup"
+                        initial={{ opacity: 0, y: 30, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 20, scale: 0.95 }}
+                        transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+                        className="absolute inset-x-6 bottom-20 z-30 mx-auto max-w-md"
+                    >
+                        <div className="rounded-2xl border border-fuchsia-300/30 bg-fuchsia-950/80 px-6 py-5 shadow-[0_20px_60px_rgba(168,85,247,0.2)] backdrop-blur-lg">
+                            <div className="flex items-start gap-3">
+                                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fuchsia-400/20">
+                                    <BrainCircuit size={16} className="text-fuchsia-300" />
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-fuchsia-300/80">Cognitive Coach</p>
+                                    <p className="mt-2 text-sm leading-6 text-white/90">{interventionMessage}</p>
+                                </div>
+                            </div>
                         </div>
                     </motion.div>
                 )}

@@ -20,6 +20,7 @@ from .agents import (
 )
 from .contracts import (
     CognitiveChunk,
+    CognitivePath,
     DeviationAnalysis,
     EndSessionRequest,
     EndSessionResponse,
@@ -36,10 +37,14 @@ from .contracts import (
     StreamAudioChunkRequest,
     StreamAudioChunkResponse,
     TimelineEvent,
+    ValidationState,
     WebSocketEnvelope,
 )
 from .session_store import store
 from .state import build_timeline_metrics, default_problem_payload, make_session_state, resolve_phase
+from .strategy_validation.solution_graph import build_enriched_solution_graph
+from .strategy_validation.gemini_enhancer import gemini_graph_enhancer
+from .strategy_validation.validation_logger import validation_logger
 from .ws_manager import ws_manager
 
 
@@ -61,6 +66,22 @@ class SessionOrchestrator:
             for derived_event in await problem_structuring_agent.process(event, state):
                 state = self._apply_event(state, derived_event)
                 await self._dispatch_output(state, derived_event)
+
+            # Phase 7A — Build enriched solution graph from problem structure
+            if state.problem_structure:
+                state.solution_graph = build_enriched_solution_graph(state.problem_structure)
+                # Phase 7B — Gemini graph enhancement (non-blocking, validated merge)
+                try:
+                    state.solution_graph = await gemini_graph_enhancer.enhance(
+                        state.problem_structure, state.solution_graph
+                    )
+                except Exception as exc:
+                    import logging
+                    logging.getLogger("cognitive_engine.orchestrator").warning(
+                        "Gemini graph enhancement failed (non-fatal) | error=%s", exc
+                    )
+                validation_logger.log_session_graph_summary(session_id, state.solution_graph)
+
             state = self._transition_lifecycle(state, SessionLifecycle.ACTIVE)
             store.save(state)
 
@@ -106,13 +127,20 @@ class SessionOrchestrator:
                                             state = self._apply_event(state, timeline_event)
                                             await self._dispatch_output(state, timeline_event)
 
-                                        for deviation_event in await strategy_validator_agent.process(final_event, state):
-                                            state = self._apply_event(state, deviation_event)
-                                            await self._dispatch_output(state, deviation_event)
-                                            for intervention_event in await intervention_agent.process(deviation_event, state):
-                                                state = self._apply_event(state, intervention_event)
-                                                intervention_recommended = True
-                                                await self._dispatch_output(state, intervention_event)
+                                        for validation_event in await strategy_validator_agent.process(final_event, state):
+                                            state = self._apply_event(state, validation_event)
+                                            await self._dispatch_output(state, validation_event)
+                                            
+                                            # Route deviation/delay/inefficiency to intervention agent
+                                            if validation_event.event_type in {
+                                                EngineEventType.DEVIATION_DETECTED,
+                                                EngineEventType.DELAY_DETECTED,
+                                                EngineEventType.INEFFICIENCY_DETECTED,
+                                            }:
+                                                for intervention_event in await intervention_agent.process(validation_event, state):
+                                                    state = self._apply_event(state, intervention_event)
+                                                    intervention_recommended = True
+                                                    await self._dispatch_output(state, intervention_event)
 
             store.save(state)
 
@@ -178,37 +206,56 @@ class SessionOrchestrator:
         await self._dispatch_phase(state)
         return EndSessionResponse(session_id=payload.session_id, lifecycle_state=state.lifecycle_state, closed_at=state.closed_at or utc_now(), total_chunks=len(state.chunks), total_interventions=state.intervention_count)
 
-    def generate_report(self, session_id: str) -> GenerateReportResponse:
+    async def generate_report(self, session_id: str) -> dict:
         state = store.get(session_id)
         if state is None:
             raise KeyError("Session not found.")
         metrics = build_timeline_metrics(state)
-        deviation_events = sum(1 for chunk in state.chunks if chunk.deviation_flag)
-        llm_chunks = sum(1 for chunk in state.chunks if chunk.llm_used)
-        exploration_chunks = sum(1 for chunk in state.chunks if chunk.exploration_valid)
-        optimal_method = state.problem_structure.optimal_path[0] if state.problem_structure and state.problem_structure.optimal_path else None
-        strategy_evaluation = StrategyEvaluation(
-            strategy_status="phase_6_problem_structure_comparator",
-            optimal_method=optimal_method,
-            summary=f"The report is grounded in the problem method graph. {exploration_chunks} chunks were marked as productive exploration, and LLM refinement was used on {llm_chunks} chunks.",
+        vs = state.validation_state
+        path = state.cognitive_path
+
+        # Build thinking graph
+        from .agents import report_generator_agent
+        thinking_graph = report_generator_agent._build_thinking_graph(path)
+
+        # Generate Gemini insight
+        insight, improvement_rule = await report_generator_agent._generate_gemini_insight(
+            state, thinking_graph, metrics, vs
         )
-        deviation_analysis = DeviationAnalysis(
-            deviation_score=round(state.deviation_score, 2),
-            deviation_events=deviation_events,
-            summary="Deviation remained low or exploratory." if deviation_events == 0 else "Deviation was confirmed only after contextual checks against the valid method graph.",
-        )
-        suggestions = [
-            "Stay inside the valid method set identified for the problem before branching out.",
-            "When multiple methods are valid, verbalize why one is more direct so the system can confirm productive exploration.",
-            f"If you already have the givens for {optimal_method}, commit earlier to reduce strategy delay." if optimal_method else "Commit earlier once the strongest valid method is clear.",
-        ]
-        return GenerateReportResponse(session_id=session_id, timeline_metrics=metrics, deviation_analysis=deviation_analysis, strategy_evaluation=strategy_evaluation, improvement_suggestions=suggestions)
+
+        return {
+            "session_id": session_id,
+            "timeline_metrics": metrics.model_dump(mode="json"),
+            "thinking_graph": thinking_graph,
+            "insight": insight,
+            "improvement_rule": improvement_rule,
+            "total_chunks": len(state.chunks),
+            "total_interventions": state.intervention_count,
+            "validation_state": vs.model_dump(mode="json") if vs else None,
+            "answer_result": None,
+        }
 
     async def send_snapshot(self, session_id: str) -> None:
         state = store.get(session_id)
         if state is None:
             return
-        await ws_manager.broadcast(session_id, WebSocketEnvelope(type="session_snapshot", data={"session_id": state.session_id, "lifecycle_state": state.lifecycle_state.value, "phase": state.phase.value, "timeline": [item.model_dump(mode="json") for item in state.timeline], "metrics": state.metrics, "problem_structure": state.problem_structure.model_dump(mode="json") if state.problem_structure else None}))
+        await ws_manager.broadcast(session_id, WebSocketEnvelope(
+            type="session_snapshot",
+            data={
+                "session_id": state.session_id,
+                "lifecycle_state": state.lifecycle_state.value,
+                "phase": state.phase.value,
+                "timeline": [item.model_dump(mode="json") for item in state.timeline],
+                "metrics": state.metrics,
+                "problem_structure": state.problem_structure.model_dump(mode="json") if state.problem_structure else None,
+                "validation_state": state.validation_state.model_dump(mode="json"),
+                "solution_graph_summary": {
+                    "node_count": len(state.solution_graph.nodes) if state.solution_graph else 0,
+                    "optimal_paths": len(state.solution_graph.optimal_paths) if state.solution_graph else 0,
+                    "alternative_paths": len(state.solution_graph.alternative_paths) if state.solution_graph else 0,
+                } if state.solution_graph else None,
+            },
+        ))
 
     def _apply_event(self, state: SessionState, event: EngineEvent) -> SessionState:
         if event.event_type == EngineEventType.SESSION_STARTED:
@@ -228,6 +275,14 @@ class SessionOrchestrator:
             state.timeline.append(TimelineEvent(event_type=event.event_type.value, at_seconds=float(event.payload.get("at_seconds", 0.0)), category="intervention", message="Intervention triggered", payload=event.payload))
         elif event.event_type == EngineEventType.SESSION_ENDED:
             state.timeline.append(TimelineEvent(event_type=event.event_type.value, at_seconds=float(event.payload.get("at_seconds", 0.0)), category="system", message="Session ended", payload=event.payload))
+        elif event.event_type == EngineEventType.VALIDATION_STATE_UPDATED:
+            vs_data = event.payload.get("validation_state")
+            if vs_data:
+                state.validation_state = ValidationState.model_validate(vs_data)
+        
+        # Note: Phase 7 validation events (PATH_UPDATE, DELAY, etc.) are broadcast but NOT stored in timeline
+        # to prevent UI flooding. They are captured in session_state.validation_state and cognitive_path.
+        
         state.updated_at = utc_now()
         state.metrics = build_timeline_metrics(state).model_dump()
         return state
@@ -247,6 +302,16 @@ class SessionOrchestrator:
             await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="intervention", data={"message": event.payload.get("message", "Intervention triggered"), "reason": event.payload.get("reason"), "timestamp": event.payload.get("at_seconds", 0.0)}))
         elif event.event_type == EngineEventType.STATUS_UPDATED:
             await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="status_update", data={"status": event.payload.get("status", "Idle...")}))
+        elif event.event_type == EngineEventType.PATH_UPDATE:
+            await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="path_update", data=event.payload))
+        elif event.event_type == EngineEventType.VALIDATION_STATE_UPDATED:
+            await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="validation_state", data=event.payload))
+        elif event.event_type == EngineEventType.DELAY_DETECTED:
+            await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="delay_detected", data=event.payload))
+        elif event.event_type == EngineEventType.INEFFICIENCY_DETECTED:
+            await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="inefficiency_detected", data=event.payload))
+        elif event.event_type == EngineEventType.PATH_PROGRESS:
+            await ws_manager.broadcast(state.session_id, WebSocketEnvelope(type="path_progress", data=event.payload))
 
 
 orchestrator = SessionOrchestrator()

@@ -13,6 +13,8 @@ from .contracts import (
     InterventionEventResponse,
     StartSessionRequest,
     StreamAudioChunkRequest,
+    ValidateAnswerRequest,
+    ValidateAnswerResponse,
 )
 from .orchestrator import orchestrator
 from .ws_manager import ws_manager
@@ -25,8 +27,8 @@ logger = logging.getLogger("cognitive_engine.main")
 
 app = FastAPI(
     title="TCMTE Cognitive Engine",
-    version="0.6.0-phase6",
-    description="Phase 6 cognitive runtime with problem structuring, method graph generation, symbolic representation, contextual cognition, and live session orchestration.",
+    version="0.9.0-phase9",
+    description="Phase 9 cognitive runtime with enhanced interventions, answer validation, and Gemini-powered reports.",
 )
 
 app.add_middleware(
@@ -45,7 +47,7 @@ app.add_middleware(
 
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
-    return {"status": "ok", "phase": "phase_6_problem_structuring_engine"}
+    return {"status": "ok", "phase": "phase_7a_strategy_validation_engine"}
 
 
 @app.post("/start_session")
@@ -102,11 +104,45 @@ async def end_session(payload: EndSessionRequest):
 
 
 @app.post("/generate_report")
-def generate_report(payload: GenerateReportRequest):
+async def generate_report(payload: GenerateReportRequest):
     try:
-        return orchestrator.generate_report(payload.session_id)
+        return await orchestrator.generate_report(payload.session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/validate_answer")
+async def validate_answer(payload: ValidateAnswerRequest):
+    import base64
+    from .answer_validator import validate_answer as run_validation
+    from .session_store import store as _store
+
+    state = _store.get(payload.session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    try:
+        image_bytes = base64.b64decode(payload.image_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 image data.")
+
+    problem_text = state.problem_payload.raw_text if state.problem_payload else ""
+    if not problem_text:
+        raise HTTPException(status_code=400, detail="No problem text available for this session.")
+
+    result = await run_validation(image_bytes, problem_text)
+    logger.info(
+        "Answer validated | session=%s correct=%s extracted=%s expected=%s",
+        payload.session_id, result.get("correct"), result.get("extracted_answer"), result.get("expected_answer"),
+    )
+    return ValidateAnswerResponse(
+        session_id=payload.session_id,
+        correct=result.get("correct", False),
+        extracted_answer=result.get("extracted_answer", ""),
+        expected_answer=result.get("expected_answer", ""),
+        ocr_text=result.get("ocr_text", ""),
+        explanation=result.get("explanation", ""),
+    )
 
 
 @app.websocket("/ws/session/{session_id}")
@@ -120,3 +156,27 @@ async def session_socket(websocket: WebSocket, session_id: str) -> None:
     except WebSocketDisconnect:
         ws_manager.disconnect(session_id, websocket)
         logger.info("WebSocket disconnected | session=%s", session_id)
+
+
+# Phase 7A debug endpoint
+@app.get("/session/{session_id}/validation_state")
+def get_validation_state(session_id: str):
+    from .session_store import store as _store
+    state = _store.get(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {
+        "session_id": session_id,
+        "validation_state": state.validation_state.model_dump(mode="json"),
+        "cognitive_path": {
+            "node_count": len(state.cognitive_path.nodes),
+            "on_graph": state.cognitive_path.on_graph_count(),
+            "off_graph": state.cognitive_path.off_graph_count(),
+            "labels": state.cognitive_path.node_labels()[-10:],
+        },
+        "solution_graph_summary": {
+            "node_count": len(state.solution_graph.nodes) if state.solution_graph else 0,
+            "optimal_paths": len(state.solution_graph.optimal_paths) if state.solution_graph else 0,
+            "alternative_paths": len(state.solution_graph.alternative_paths) if state.solution_graph else 0,
+        } if state.solution_graph else None,
+    }
