@@ -734,7 +734,7 @@ class ReportGeneratorAgent:
         thinking_graph = self._build_thinking_graph(path)
 
         time_analysis = self._build_time_analysis(session_state, metrics)
-        insight_payload = await self._generate_gemini_insight(
+        insight_payload = await self._generate_report_insight(
             session_state,
             thinking_graph,
             metrics,
@@ -848,7 +848,22 @@ class ReportGeneratorAgent:
             )
         return "\n".join(digest_lines) if digest_lines else "No chunk timeline available."
 
-    async def _generate_gemini_insight(
+    def _extract_json_payload(self, text: str) -> dict:
+        import json
+
+        raw_text = (text or "").strip()
+        if not raw_text:
+            return {}
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError:
+            start = raw_text.find("{")
+            end = raw_text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(raw_text[start : end + 1])
+        return {}
+
+    async def _generate_report_insight(
         self,
         session_state,
         thinking_graph: str,
@@ -857,15 +872,36 @@ class ReportGeneratorAgent:
         time_analysis: dict,
         predictive_analytics: dict,
     ) -> dict:
-        """Use Gemini only to generate detailed reasoning analysis for one question."""
+        """Use Grok first, then Gemini, to generate report insights."""
         from .config import get_settings
-        import json
         import httpx
 
         settings = get_settings()
         candidates = [
-            ("GEMINI3", settings.gemini3.api_key, settings.gemini3.model, settings.gemini3.timeout_seconds),
-            ("GEMINI2", settings.gemini2.api_key, settings.gemini2.model, settings.gemini2.timeout_seconds),
+            {
+                "provider": "GROK",
+                "api_key": settings.grok.api_key,
+                "model": settings.grok.model,
+                "timeout_seconds": settings.grok.timeout_seconds,
+                "kind": "grok",
+                "url": settings.grok.base_url,
+            },
+            {
+                "provider": "GEMINI3",
+                "api_key": settings.gemini3.api_key,
+                "model": settings.gemini3.model,
+                "timeout_seconds": settings.gemini3.timeout_seconds,
+                "kind": "gemini",
+                "url": None,
+            },
+            {
+                "provider": "GEMINI2",
+                "api_key": settings.gemini2.api_key,
+                "model": settings.gemini2.model,
+                "timeout_seconds": settings.gemini2.timeout_seconds,
+                "kind": "gemini",
+                "url": None,
+            },
         ]
 
         problem_text = session_state.problem_payload.raw_text if session_state.problem_payload else ""
@@ -886,7 +922,7 @@ class ReportGeneratorAgent:
             f"The detailed_analysis must discuss understanding time, time to strategy, execution pace, verification, longest silence, interventions, and how the strategy evolved over time."
         )
 
-        if not any(api_key for _, api_key, _, _ in candidates):
+        if not any(candidate["api_key"] for candidate in candidates):
             return self._fallback_insight(
                 session_state,
                 thinking_graph,
@@ -895,42 +931,92 @@ class ReportGeneratorAgent:
                 predictive_analytics,
             )
 
-        for provider, api_key, model, timeout_seconds in candidates:
+        for candidate in candidates:
+            provider = candidate["provider"]
+            api_key = candidate["api_key"]
+            model = candidate["model"]
+            timeout_seconds = candidate["timeout_seconds"]
             if not api_key:
                 continue
             try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                if candidate["kind"] == "grok":
+                    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                        response = await client.post(
+                            candidate["url"],
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": model,
+                                "temperature": 0.35,
+                                "stream": False,
+                                "messages": [
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You generate math thinking-session reports. "
+                                            "Return valid JSON only with keys "
+                                            "\"insight\", \"improvement_rule\", and "
+                                            "\"detailed_analysis\"."
+                                        ),
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": prompt,
+                                    },
+                                ],
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
 
-                async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                    response = await client.post(url, json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {
-                            "temperature": 0.35,
-                            "maxOutputTokens": 700,
-                            "responseMimeType": "application/json",
-                        },
-                    })
-                    response.raise_for_status()
-                    data = response.json()
+                    text = (
+                        data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                else:
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{model}:generateContent?key={api_key}"
+                    )
+                    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                        response = await client.post(
+                            url,
+                            json={
+                                "contents": [{"parts": [{"text": prompt}]}],
+                                "generationConfig": {
+                                    "temperature": 0.35,
+                                    "maxOutputTokens": 700,
+                                    "responseMimeType": "application/json",
+                                },
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
 
-                text = "".join(
-                    part.get("text", "")
-                    for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                )
-                parsed = json.loads(text)
+                    text = "".join(
+                        part.get("text", "")
+                        for part in data.get("candidates", [{}])[0]
+                        .get("content", {})
+                        .get("parts", [])
+                    )
+
+                parsed = self._extract_json_payload(text)
                 insight = str(parsed.get("insight", "")).strip()
                 improvement = str(parsed.get("improvement_rule", "")).strip()
                 detailed = str(parsed.get("detailed_analysis", "")).strip()
 
                 if insight and improvement and detailed:
-                    logger.info("Gemini insight generated successfully | provider=%s", provider)
+                    logger.info("Report insight generated successfully | provider=%s", provider)
                     return {
                         "insight": insight,
                         "improvement_rule": improvement,
                         "detailed_analysis": detailed,
                     }
             except Exception as exc:
-                logger.warning("Gemini insight generation failed | provider=%s error=%s", provider, exc)
+                logger.warning("Report insight generation failed | provider=%s error=%s", provider, exc)
 
         return self._fallback_insight(
             session_state,

@@ -134,7 +134,7 @@ function AppRoutes() {
         <Route
           path="/quiz"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedRoles={['student']}>
               <QuizPage />
             </ProtectedRoute>
           }
@@ -150,7 +150,7 @@ function AppRoutes() {
         <Route
           path="/streak"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedRoles={['student']}>
               <StreakPage />
             </ProtectedRoute>
           }

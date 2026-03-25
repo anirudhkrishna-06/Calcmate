@@ -391,14 +391,14 @@ export default function ChatbotPage() {
     };
 
     return (
-        <div className="min-h-screen bg-white flex flex-col">
+        <div className="h-screen overflow-hidden bg-white flex flex-col">
             <Navbar />
-            <div className="flex-1 flex overflow-hidden">
+            <div className="flex-1 min-h-0 flex overflow-hidden">
                 {/* Sidebar — Chat History */}
                 <AnimatePresence>
                     {sidebarOpen && (
                         <motion.aside
-                            className="w-72 bg-gray-50 border-r border-gray-100 flex flex-col flex-shrink-0"
+                            className="h-full w-72 bg-gray-50 border-r border-gray-100 flex flex-col flex-shrink-0"
                             initial={{ x: -288, opacity: 0 }}
                             animate={{ x: 0, opacity: 1 }}
                             exit={{ x: -288, opacity: 0 }}
@@ -425,7 +425,7 @@ export default function ChatbotPage() {
                             </div>
 
                             {/* Session list */}
-                            <div className="flex-1 overflow-y-auto py-2">
+                            <div className="flex-1 min-h-0 overflow-y-auto py-2">
                                 {isHistoryLoading ? (
                                     <div className="px-4 py-8 text-center">
                                         <Loader2 size={20} className="text-gray-300 mx-auto mb-2 animate-spin" />
@@ -482,7 +482,7 @@ export default function ChatbotPage() {
                 </AnimatePresence>
 
                 {/* Main Chat Area */}
-                <div className="flex-1 flex flex-col min-w-0">
+                <div className="relative flex-1 min-h-0 min-w-0 flex flex-col">
                     {/* Toggle sidebar button */}
                     {!sidebarOpen && (
                         <button
@@ -494,7 +494,7 @@ export default function ChatbotPage() {
                     )}
 
                     {/* Messages */}
-                    <div className="flex-1 overflow-y-auto px-4 py-6">
+                    <div className="flex-1 min-h-0 overflow-y-auto px-4 py-6">
                         <div className="max-w-3xl mx-auto space-y-1">
                             {messages.length === 0 && (
                                 <div className="flex flex-col items-center justify-center h-full min-h-[400px]">

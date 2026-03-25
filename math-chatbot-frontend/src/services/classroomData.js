@@ -14,8 +14,10 @@ import { db } from '../../firebase';
 import {
     createClientId,
     getUserAnalytics,
+    getUserStreak,
     listUserChats,
     saveUserAnalytics,
+    syncUserStreakFromChats,
 } from './userData';
 import { getUserRatingProfile } from './contestData';
 
@@ -96,12 +98,13 @@ export async function listTeacherStudents(teacherId) {
         snapshot.docs.map(async (studentDoc) => {
             const base = studentDoc.data();
             const studentId = studentDoc.id;
-            const [userSnap, analytics, chats, quizSummary, ratingProfile] = await Promise.all([
+            const [userSnap, analytics, chats, quizSummary, ratingProfile, streakSummary] = await Promise.all([
                 getDoc(doc(db, 'users', studentId)),
                 getUserAnalytics(studentId),
                 listUserChats(studentId, 25),
                 getUserQuizSummary(studentId),
                 getUserRatingProfile(studentId),
+                getUserStreak(studentId),
             ]);
 
             const userData = userSnap.exists() ? userSnap.data() : {};
@@ -127,6 +130,7 @@ export async function listTeacherStudents(teacherId) {
                 },
                 quizSummary,
                 ratingProfile,
+                streakSummary,
             };
         })
     );
@@ -290,6 +294,9 @@ export async function recordQuizAttempt(userId, attempt) {
             attendedAt: completedAt,
         });
     }
+
+    const chats = await listUserChats(userId, 100);
+    await syncUserStreakFromChats(userId, chats);
 
     return normalizedAttempt;
 }

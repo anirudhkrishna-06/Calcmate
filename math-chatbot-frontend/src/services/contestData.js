@@ -11,7 +11,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { API_BASE } from '../config/api';
-import { createClientId } from './userData';
+import { createClientId, listUserChats, syncUserStreakFromChats } from './userData';
 
 const contestsCollectionRef = () => collection(db, 'contests');
 const contestDocRef = (contestId) => doc(db, 'contests', contestId);
@@ -416,6 +416,9 @@ async function persistContestEvaluation(contest, evaluation) {
                 },
                 { merge: true }
             );
+
+            const chats = await listUserChats(entry.userId, 100);
+            await syncUserStreakFromChats(entry.userId, chats);
         })
     );
 }

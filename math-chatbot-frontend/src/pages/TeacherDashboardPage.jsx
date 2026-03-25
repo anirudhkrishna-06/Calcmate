@@ -5,11 +5,13 @@ import {
     ArrowRight,
     BarChart3,
     Brain,
+    Flame,
     Mail,
     Plus,
     Sparkles,
     Target,
     Users,
+    Clock3,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import Navbar from '../components/Navbar';
@@ -72,6 +74,13 @@ export default function TeacherDashboardPage() {
             totalStudents > 0
                 ? students.reduce((sum, student) => sum + (student.ratingProfile?.currentRating || 0), 0) / totalStudents
                 : 0;
+        const averageStreak =
+            totalStudents > 0
+                ? students.reduce((sum, student) => sum + (student.streakSummary?.currentStreak || 0), 0) / totalStudents
+                : 0;
+        const engagedToday = students.filter((student) =>
+            student.streakSummary?.activeDays?.includes(new Date().toISOString().slice(0, 10))
+        ).length;
 
         return {
             totalStudents,
@@ -79,6 +88,8 @@ export default function TeacherDashboardPage() {
             totalQuizzes,
             averageQuizScore: Number(averageQuizScore.toFixed(1)),
             averageRating: Number(averageRating.toFixed(0)),
+            averageStreak: Number(averageStreak.toFixed(1)),
+            engagedToday,
         };
     }, [students]);
 
@@ -128,6 +139,7 @@ export default function TeacherDashboardPage() {
         { label: 'Quiz Attendance', value: classroomOverview.totalQuizzes, helper: 'Completed adaptive quiz attempts', icon: Mail },
         { label: 'Average Quiz Score', value: `${classroomOverview.averageQuizScore}%`, helper: 'Rolling class performance benchmark', icon: BarChart3 },
         { label: 'Class Rating', value: classroomOverview.averageRating, helper: 'Average contest rating across linked students', icon: Sparkles },
+        { label: 'Avg Streak', value: `${classroomOverview.averageStreak}d`, helper: 'Average active streak across linked students', icon: Flame },
     ];
 
     return (
@@ -170,7 +182,7 @@ export default function TeacherDashboardPage() {
                         </motion.div>
                     </div>
 
-                    <div className="grid sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-6">
+                    <div className="grid sm:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
                         {overviewCards.map((card, index) => {
                             const Icon = card.icon;
                             return (
@@ -233,6 +245,30 @@ export default function TeacherDashboardPage() {
                         </motion.div>
 
                         <motion.div className="rounded-[28px] border border-gray-100 bg-white p-6" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, delay: 0.24 }}>
+                            <div className="mb-6 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+                                <div className="rounded-[24px] border border-slate-200 bg-slate-950 p-5 text-white">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Classroom Pulse</p>
+                                            <p className="mt-3 text-2xl font-bold">{classroomOverview.engagedToday} students active today</p>
+                                        </div>
+                                        <Activity size={18} className="text-cyan-300" />
+                                    </div>
+                                    <p className="mt-3 text-sm leading-7 text-slate-300">
+                                        Consistency now reflects questions, quizzes, and contest participation, so the classroom signal is based on real usage across the app.
+                                    </p>
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-4">
+                                        <p className="text-xs uppercase tracking-[0.14em] text-blue-500">Avg Streak</p>
+                                        <p className="mt-2 text-2xl font-bold text-blue-900">{classroomOverview.averageStreak}d</p>
+                                    </div>
+                                    <div className="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-4">
+                                        <p className="text-xs uppercase tracking-[0.14em] text-amber-600">Today</p>
+                                        <p className="mt-2 text-2xl font-bold text-amber-900">{classroomOverview.engagedToday}</p>
+                                    </div>
+                                </div>
+                            </div>
                             {!selectedStudent ? (
                                 <div className="h-full min-h-[420px] flex items-center justify-center text-center">
                                     <div>
@@ -258,12 +294,12 @@ export default function TeacherDashboardPage() {
                                     <div className="grid md:grid-cols-3 gap-4 mb-6">
                                         <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Target size={15} className="text-blue-600" />Weak Spots</div><div className="space-y-2">{(selectedStudent.analytics?.weakTopics || []).slice(0, 3).map((topic) => <div key={topic.topic} className="rounded-xl bg-gray-50 px-3 py-2"><p className="text-sm font-medium text-gray-900">{topic.topic}</p><p className="text-xs text-gray-500 mt-1">{topic.count} questions · score {topic.score}</p></div>)}{(selectedStudent.analytics?.weakTopics || []).length === 0 && <p className="text-sm text-gray-500">Not enough data yet.</p>}</div></div>
                                         <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Brain size={15} className="text-blue-600" />Chat Summary</div><div className="space-y-3 text-sm text-gray-600"><div className="flex items-center justify-between"><span>Total sessions</span><span className="font-semibold text-gray-900">{selectedStudent.chatSummary?.totalSessions || 0}</span></div><div className="flex items-center justify-between"><span>Total questions</span><span className="font-semibold text-gray-900">{selectedStudent.chatSummary?.totalQuestions || 0}</span></div><div><p className="text-xs uppercase tracking-[0.14em] text-gray-400 mb-2">Latest conversation</p><p className="font-medium text-gray-900">{selectedStudent.chatSummary?.latestChatTitle || 'No conversations yet'}</p><p className="text-xs text-gray-500 mt-1">{formatDate(selectedStudent.chatSummary?.latestChatAt)}</p></div></div></div>
-                                        <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Activity size={15} className="text-blue-600" />Contest + Quiz</div><div className="space-y-3 text-sm text-gray-600"><div className="flex items-center justify-between"><span>Contests played</span><span className="font-semibold text-gray-900">{selectedStudent.ratingProfile?.contestsPlayed || 0}</span></div><div className="flex items-center justify-between"><span>Quiz average</span><span className="font-semibold text-gray-900">{selectedStudent.quizSummary?.averageScore || 0}%</span></div><div className="flex items-center justify-between"><span>Last rating change</span><span className="font-semibold text-gray-900">{selectedStudent.ratingProfile?.lastRatingChange || 0}</span></div></div></div>
+                                        <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Activity size={15} className="text-blue-600" />Contest + Quiz</div><div className="space-y-3 text-sm text-gray-600"><div className="flex items-center justify-between"><span>Contests played</span><span className="font-semibold text-gray-900">{selectedStudent.ratingProfile?.contestsPlayed || 0}</span></div><div className="flex items-center justify-between"><span>Quiz average</span><span className="font-semibold text-gray-900">{selectedStudent.quizSummary?.averageScore || 0}%</span></div><div className="flex items-center justify-between"><span>Current streak</span><span className="font-semibold text-gray-900">{selectedStudent.streakSummary?.currentStreak || 0}d</span></div><div className="flex items-center justify-between"><span>Last rating change</span><span className="font-semibold text-gray-900">{selectedStudent.ratingProfile?.lastRatingChange || 0}</span></div></div></div>
                                     </div>
 
                                     <div className="grid lg:grid-cols-[0.92fr_1.08fr] gap-5">
                                         <div className="rounded-2xl border border-gray-100 p-5"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold text-gray-900">Most Asked Topics</h3><p className="text-sm text-gray-500 mt-1">Where the student spends the most attention.</p></div><BarChart3 size={17} className="text-blue-600" /></div><div className="space-y-3">{(selectedStudent.analytics?.mostAskedTopics || []).slice(0, 4).map((topic, index) => <div key={topic.topic} className="flex items-center justify-between rounded-xl border border-gray-100 px-4 py-3"><div><p className="text-sm font-medium text-gray-900">{index + 1}. {topic.topic}</p><p className="text-xs text-gray-500 mt-1">{topic.share}% share of tracked questions</p></div><span className="text-sm font-semibold text-blue-600">{topic.count}</span></div>)}{(selectedStudent.analytics?.mostAskedTopics || []).length === 0 && <p className="text-sm text-gray-500">No topic distribution available yet.</p>}</div></div>
-                                        <div className="rounded-2xl border border-gray-100 p-5"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold text-gray-900">Teacher Action Signal</h3><p className="text-sm text-gray-500 mt-1">Fast interpretation of where to intervene next.</p></div><ArrowRight size={17} className="text-blue-600" /></div><div className="rounded-2xl bg-slate-950 text-white p-5"><p className="text-xs uppercase tracking-[0.18em] text-slate-400">Recommended Focus</p><p className="text-2xl font-bold mt-3">{selectedStudent.analytics?.weakTopics?.[0]?.topic || 'Await more student activity'}</p><p className="text-sm text-slate-300 mt-3 leading-7">{selectedStudent.analytics?.weakTopics?.[0] ? `${selectedStudent.name} is repeatedly returning to ${selectedStudent.analytics.weakTopics[0].topic}. The signal combines frequency, recency, and persistence across sessions, which makes this the strongest intervention target right now.` : 'Once the student starts asking questions or attending quizzes, the dashboard will generate a precise intervention direction here.'}</p></div><div className="grid grid-cols-2 gap-3 mt-4"><div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3"><p className="text-xs text-gray-400 uppercase tracking-[0.14em]">Average Quiz</p><p className="text-lg font-semibold text-gray-900 mt-2">{selectedStudent.analytics?.averageQuizScore || 0}%</p></div><div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3"><p className="text-xs text-gray-400 uppercase tracking-[0.14em]">Questions Asked</p><p className="text-lg font-semibold text-gray-900 mt-2">{selectedStudent.analytics?.totalQuestions || 0}</p></div></div></div>
+                                        <div className="rounded-2xl border border-gray-100 p-5"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold text-gray-900">Teacher Action Signal</h3><p className="text-sm text-gray-500 mt-1">Fast interpretation of where to intervene next.</p></div><ArrowRight size={17} className="text-blue-600" /></div><div className="rounded-2xl bg-slate-950 text-white p-5"><p className="text-xs uppercase tracking-[0.18em] text-slate-400">Recommended Focus</p><p className="text-2xl font-bold mt-3">{selectedStudent.analytics?.weakTopics?.[0]?.topic || 'Await more student activity'}</p><p className="text-sm text-slate-300 mt-3 leading-7">{selectedStudent.analytics?.weakTopics?.[0] ? `${selectedStudent.name} is repeatedly returning to ${selectedStudent.analytics.weakTopics[0].topic}. The signal combines frequency, recency, persistence, and consistency across the app, which makes this the strongest intervention target right now.` : 'Once the student starts asking questions, attending quizzes, or entering contests, the dashboard will generate a precise intervention direction here.'}</p></div><div className="grid grid-cols-3 gap-3 mt-4"><div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3"><p className="text-xs text-gray-400 uppercase tracking-[0.14em]">Average Quiz</p><p className="text-lg font-semibold text-gray-900 mt-2">{selectedStudent.analytics?.averageQuizScore || 0}%</p></div><div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3"><p className="text-xs text-gray-400 uppercase tracking-[0.14em]">Questions Asked</p><p className="text-lg font-semibold text-gray-900 mt-2">{selectedStudent.analytics?.totalQuestions || 0}</p></div><div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-3"><p className="text-xs text-gray-400 uppercase tracking-[0.14em]">Active Days</p><p className="text-lg font-semibold text-gray-900 mt-2">{selectedStudent.streakSummary?.activeDays?.length || 0}</p></div></div><div className="mt-4 rounded-2xl border border-orange-100 bg-orange-50 px-4 py-3 text-sm text-orange-800 flex items-center justify-between"><span className="inline-flex items-center gap-2"><Clock3 size={15} />Consistency signal</span><span className="font-semibold">{selectedStudent.streakSummary?.currentStreak || 0} day streak</span></div></div>
                                     </div>
                                 </>
                             )}

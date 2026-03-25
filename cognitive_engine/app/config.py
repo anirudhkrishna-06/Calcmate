@@ -61,10 +61,17 @@ class Gemini3Settings(BaseModel):
     timeout_seconds: float = 10.0
 
 
+class GrokSettings(BaseModel):
+    api_key: str | None = None
+    model: str = "grok-4.20-reasoning"
+    base_url: str = "https://api.x.ai/v1/chat/completions"
+    timeout_seconds: float = 20.0
+
+
 class OllamaSettings(BaseModel):
     enabled: bool = False
     base_url: str = "http://localhost:11434/v1"
-    model: str = "qwen2.5:7b"
+    model: str = "qwen3.5:397b-cloud"
     timeout_seconds: float = 20.0
 
 
@@ -82,6 +89,7 @@ class EngineSettings(BaseModel):
     gemini: GeminiSettings
     gemini2: Gemini2Settings
     gemini3: Gemini3Settings
+    grok: GrokSettings
     ollama: OllamaSettings
     predictive_analytics: PredictiveAnalyticsSettings
 
@@ -134,6 +142,12 @@ def get_settings() -> EngineSettings:
         model=os.getenv("GEMINI3_MODEL", os.getenv("GEMINI2_MODEL", "gemini-2.0-flash")),
         timeout_seconds=float(os.getenv("GEMINI3_TIMEOUT_SECONDS", "10.0")),
     )
+    grok = GrokSettings(
+        api_key=os.getenv("GROK_API_KEY"),
+        model=os.getenv("GROK_MODEL", "grok-4.20-reasoning"),
+        base_url=os.getenv("GROK_BASE_URL", "https://api.x.ai/v1/chat/completions"),
+        timeout_seconds=float(os.getenv("GROK_TIMEOUT_SECONDS", "20.0")),
+    )
     ollama = OllamaSettings(
         enabled=os.getenv("OLLAMA_ENABLED", "true").lower() == "true",
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
@@ -160,6 +174,7 @@ def get_settings() -> EngineSettings:
         gemini=gemini,
         gemini2=gemini2,
         gemini3=gemini3,
+        grok=grok,
         ollama=ollama,
         predictive_analytics=predictive_analytics,
     )

@@ -224,7 +224,7 @@ class SessionOrchestrator:
 
         time_analysis = report_generator_agent._build_time_analysis(state, metrics)
         predictive_analytics = predictive_analytics_service.build_report_payload(state)
-        insight_payload = await report_generator_agent._generate_gemini_insight(
+        insight_payload = await report_generator_agent._generate_report_insight(
             state,
             thinking_graph,
             metrics,

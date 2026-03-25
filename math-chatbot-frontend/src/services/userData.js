@@ -25,8 +25,13 @@ const DEFAULT_PROFILE = {
 const DEFAULT_STREAK = {
     activeDays: [],
     totalSolved: 0,
+    totalActivities: 0,
+    chatActivities: 0,
+    quizActivities: 0,
+    contestActivities: 0,
     currentStreak: 0,
     longestStreak: 0,
+    lastActivityAt: null,
     updatedAt: null,
 };
 
@@ -60,6 +65,8 @@ const chatDocRef = (userId, chatId) => doc(db, 'users', userId, 'chats', chatId)
 const profileDocRef = (userId) => doc(db, 'users', userId, 'profile', 'settings');
 const streakDocRef = (userId) => doc(db, 'users', userId, 'streak', 'summary');
 const analyticsDocRef = (userId) => doc(db, 'users', userId, 'analytics', 'summary');
+const quizAttemptsCollectionRef = (userId) => collection(db, 'users', userId, 'quizAttempts');
+const ratingDocRef = (userId) => doc(db, 'users', userId, 'rating', 'summary');
 
 const normalizeIsoDate = (value) => {
     if (!value) return null;
@@ -266,8 +273,123 @@ export function computeStreakFromChats(chats = []) {
     return {
         activeDays,
         totalSolved,
+        totalActivities: totalSolved,
+        chatActivities: totalSolved,
+        quizActivities: 0,
+        contestActivities: 0,
         currentStreak,
         longestStreak,
+        lastActivityAt: null,
+        updatedAt: new Date().toISOString(),
+    };
+}
+
+function normalizeActivityDateKey(timestamp) {
+    const normalized = normalizeIsoDate(timestamp);
+    return normalized ? normalized.slice(0, 10) : null;
+}
+
+function computeStreakSummaryFromDays(activeDays = []) {
+    const sortedDays = [...new Set(activeDays)].sort();
+    let longestStreak = 0;
+    let rollingStreak = 0;
+
+    sortedDays.forEach((day, index) => {
+        if (index === 0) {
+            rollingStreak = 1;
+        } else {
+            const previous = new Date(sortedDays[index - 1]);
+            const current = new Date(day);
+            const diffDays = Math.round((current - previous) / 86400000);
+            rollingStreak = diffDays === 1 ? rollingStreak + 1 : 1;
+        }
+
+        longestStreak = Math.max(longestStreak, rollingStreak);
+    });
+
+    let currentStreak = 0;
+    if (sortedDays.length > 0) {
+        const activeDaySet = new Set(sortedDays);
+        const cursor = new Date();
+        cursor.setHours(0, 0, 0, 0);
+
+        for (let offset = 0; offset < 366; offset += 1) {
+            const dateKey = cursor.toISOString().slice(0, 10);
+            if (activeDaySet.has(dateKey)) {
+                currentStreak += 1;
+                cursor.setDate(cursor.getDate() - 1);
+                continue;
+            }
+
+            if (offset === 0) {
+                cursor.setDate(cursor.getDate() - 1);
+                continue;
+            }
+
+            break;
+        }
+    }
+
+    return {
+        activeDays: sortedDays,
+        currentStreak,
+        longestStreak,
+    };
+}
+
+function buildStreakFromActivitySources({ chats = [], quizAttempts = [], contestHistory = [] }) {
+    const activeDaySet = new Set();
+    let chatActivities = 0;
+    let quizActivities = 0;
+    let contestActivities = 0;
+    let lastActivityAt = null;
+
+    chats.forEach((chat) => {
+        (chat.messages || []).forEach((message) => {
+            const role = message.role || (message.type === 'user' ? 'user' : 'bot');
+            if (role !== 'user') return;
+
+            chatActivities += 1;
+            const timestamp = normalizeIsoDate(message.timestamp);
+            const dateKey = normalizeActivityDateKey(timestamp);
+            if (dateKey) activeDaySet.add(dateKey);
+            if (timestamp && (!lastActivityAt || new Date(timestamp) > new Date(lastActivityAt))) {
+                lastActivityAt = timestamp;
+            }
+        });
+    });
+
+    quizAttempts.forEach((attempt) => {
+        const timestamp = normalizeIsoDate(attempt.completedAt);
+        const dateKey = normalizeActivityDateKey(timestamp);
+        quizActivities += 1;
+        if (dateKey) activeDaySet.add(dateKey);
+        if (timestamp && (!lastActivityAt || new Date(timestamp) > new Date(lastActivityAt))) {
+            lastActivityAt = timestamp;
+        }
+    });
+
+    contestHistory.forEach((entry) => {
+        const timestamp = normalizeIsoDate(entry.completedAt);
+        const dateKey = normalizeActivityDateKey(timestamp);
+        contestActivities += 1;
+        if (dateKey) activeDaySet.add(dateKey);
+        if (timestamp && (!lastActivityAt || new Date(timestamp) > new Date(lastActivityAt))) {
+            lastActivityAt = timestamp;
+        }
+    });
+
+    const streakSummary = computeStreakSummaryFromDays(Array.from(activeDaySet));
+    const totalActivities = chatActivities + quizActivities + contestActivities;
+
+    return {
+        ...streakSummary,
+        totalSolved: totalActivities,
+        totalActivities,
+        chatActivities,
+        quizActivities,
+        contestActivities,
+        lastActivityAt,
         updatedAt: new Date().toISOString(),
     };
 }
@@ -442,8 +564,13 @@ export async function getUserStreak(userId) {
     return {
         activeDays: Array.isArray(data.activeDays) ? data.activeDays : [],
         totalSolved: Number.isFinite(data.totalSolved) ? data.totalSolved : 0,
+        totalActivities: Number.isFinite(data.totalActivities) ? data.totalActivities : Number.isFinite(data.totalSolved) ? data.totalSolved : 0,
+        chatActivities: Number.isFinite(data.chatActivities) ? data.chatActivities : Number.isFinite(data.totalSolved) ? data.totalSolved : 0,
+        quizActivities: Number.isFinite(data.quizActivities) ? data.quizActivities : 0,
+        contestActivities: Number.isFinite(data.contestActivities) ? data.contestActivities : 0,
         currentStreak: Number.isFinite(data.currentStreak) ? data.currentStreak : 0,
         longestStreak: Number.isFinite(data.longestStreak) ? data.longestStreak : 0,
+        lastActivityAt: normalizeIsoDate(data.lastActivityAt),
         updatedAt: normalizeIsoDate(data.updatedAt),
     };
 }
@@ -481,8 +608,13 @@ export async function saveUserStreak(userId, streak = {}) {
     const normalizedStreak = {
         activeDays: Array.isArray(streak.activeDays) ? streak.activeDays : [],
         totalSolved: Number.isFinite(streak.totalSolved) ? streak.totalSolved : 0,
+        totalActivities: Number.isFinite(streak.totalActivities) ? streak.totalActivities : Number.isFinite(streak.totalSolved) ? streak.totalSolved : 0,
+        chatActivities: Number.isFinite(streak.chatActivities) ? streak.chatActivities : 0,
+        quizActivities: Number.isFinite(streak.quizActivities) ? streak.quizActivities : 0,
+        contestActivities: Number.isFinite(streak.contestActivities) ? streak.contestActivities : 0,
         currentStreak: Number.isFinite(streak.currentStreak) ? streak.currentStreak : 0,
         longestStreak: Number.isFinite(streak.longestStreak) ? streak.longestStreak : 0,
+        lastActivityAt: normalizeIsoDate(streak.lastActivityAt),
         updatedAt: normalizeIsoDate(streak.updatedAt) || new Date().toISOString(),
     };
 
@@ -515,7 +647,26 @@ export async function saveUserAnalytics(userId, analytics = {}) {
 }
 
 export async function syncUserStreakFromChats(userId, chats = []) {
-    const streak = computeStreakFromChats(chats);
+    if (!userId) return DEFAULT_STREAK;
+
+    const [quizAttemptsSnap, ratingSnap] = await Promise.all([
+        getDocs(query(quizAttemptsCollectionRef(userId), orderBy('completedAt', 'desc'), limit(100))),
+        getDoc(ratingDocRef(userId)),
+    ]);
+
+    const quizAttempts = quizAttemptsSnap.docs.map((attemptDoc) => ({
+        id: attemptDoc.id,
+        ...attemptDoc.data(),
+        completedAt: normalizeIsoDate(attemptDoc.data().completedAt),
+    }));
+    const contestHistory = ratingSnap.exists() && Array.isArray(ratingSnap.data().contestHistory)
+        ? ratingSnap.data().contestHistory.map((entry) => ({
+            ...entry,
+            completedAt: normalizeIsoDate(entry.completedAt),
+        }))
+        : [];
+
+    const streak = buildStreakFromActivitySources({ chats, quizAttempts, contestHistory });
     await saveUserStreak(userId, streak);
     return streak;
 }
