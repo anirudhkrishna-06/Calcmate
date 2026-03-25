@@ -91,7 +91,7 @@ export default function DashboardPage() {
             desc: 'Enter the audio-first cognitive runtime for real-time thinking traces.',
             icon: Lightbulb,
             color: 'blue',
-            path: '/thinking-session',
+            path: '/thinking-setup',
             badge: 'Phase 2',
         },
         {

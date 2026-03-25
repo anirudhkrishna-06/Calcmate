@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import ProblemPanel from '../components/cognitive/ProblemPanel';
 import CognitiveIDE from '../components/cognitive/CognitiveIDE';
 import TimelinePanel from '../components/cognitive/TimelinePanel';
-import { API_BASE as API_BASE_URL, WS_BASE as WS_BASE_URL } from '../config/api';
+import { COGNITIVE_API_BASE as API_BASE_URL, COGNITIVE_WS_BASE as WS_BASE_URL } from '../config/api';
 const CHUNK_DURATION_MS = 5000;
 const ANALYSER_FFT_SIZE = 2048;
 const MIN_VOICE_THRESHOLD = 0.01;
@@ -215,6 +216,8 @@ function buildAggregateReport(rounds, reports) {
 
 export default function ThinkingSessionPage() {
     const [uiStage, setUiStage] = useState('pre_session');
+    const [launchStage, setLaunchStage] = useState('countdown');
+    const [countdownValue, setCountdownValue] = useState(3);
     const [thinkingTimer, setThinkingTimer] = useState(0);
     const [solvingTimer, setSolvingTimer] = useState(0);
     const [statusText, setStatusText] = useState('Idle...');
@@ -236,6 +239,7 @@ export default function ThinkingSessionPage() {
     const [uploadGraceUsed, setUploadGraceUsed] = useState(0);
 
     const navigate = useNavigate();
+    const location = useLocation();
 
     const wsRef = useRef(null);
     const heartbeatRef = useRef(null);
@@ -259,6 +263,23 @@ export default function ThinkingSessionPage() {
     const questionFinalizedRef = useRef(false);
     const uiStageRef = useRef('pre_session');
     const uploadStartedAtRef = useRef(null);
+
+    const launchConfig = useMemo(() => {
+        const stateConfig = location.state && typeof location.state === 'object' ? location.state : null;
+        if (stateConfig?.topic) {
+            return stateConfig;
+        }
+
+        try {
+            const storedConfig = JSON.parse(sessionStorage.getItem('mathmend_thinking_launch') || 'null');
+            return storedConfig?.topic ? storedConfig : null;
+        } catch {
+            return null;
+        }
+    }, [location.state]);
+
+    const selectedTopic = launchConfig?.topic || 'Algebra';
+    const sessionMode = launchConfig?.mode === 'pro' ? 'pro' : 'normal';
 
     useEffect(() => {
         thinkingTimerRef.current = thinkingTimer;
@@ -323,6 +344,43 @@ export default function ThinkingSessionPage() {
             window.clearTimeout(interventionTimeoutRef.current);
         }
     }, []);
+
+    useEffect(() => {
+        setLaunchStage('countdown');
+        setCountdownValue(3);
+    }, []);
+
+    useEffect(() => {
+        if (launchStage !== 'countdown') {
+            return undefined;
+        }
+
+        if (countdownValue <= 1) {
+            const primingTimeout = window.setTimeout(() => {
+                setLaunchStage('priming');
+            }, 900);
+            return () => window.clearTimeout(primingTimeout);
+        }
+
+        const tickTimeout = window.setTimeout(() => {
+            setCountdownValue((current) => current - 1);
+        }, 900);
+
+        return () => window.clearTimeout(tickTimeout);
+    }, [launchStage, countdownValue]);
+
+    useEffect(() => {
+        if (launchStage !== 'priming') {
+            return undefined;
+        }
+
+        const startTimeout = window.setTimeout(() => {
+            setLaunchStage('hidden');
+            handleStartThinking();
+        }, 1000);
+
+        return () => window.clearTimeout(startTimeout);
+    }, [launchStage]);
 
     function appendTimelineEvent(nextEvent) {
         setTimelineEvents((current) => {
@@ -722,6 +780,9 @@ export default function ThinkingSessionPage() {
     }
 
     async function handleStartThinking() {
+        if (uiStageRef.current !== 'pre_session') {
+            return;
+        }
         resetQuestionUi();
         setUiStage('loading');
         cleanupAudio();
@@ -731,7 +792,14 @@ export default function ThinkingSessionPage() {
             const response = await fetch(`${API_BASE_URL}/start_session`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
+                body: JSON.stringify({
+                    user_id: launchConfig?.userId || null,
+                    session_metadata: {
+                        topic: selectedTopic,
+                        mode: sessionMode,
+                        source: launchConfig?.source || 'thinking-session',
+                    },
+                }),
             });
             if (!response.ok) {
                 throw new Error('Unable to start the question.');
@@ -876,6 +944,7 @@ export default function ThinkingSessionPage() {
         resetQuestionUi();
         setProblemText('The problem will appear here when the session starts.');
         setUiStage('pre_session');
+        setLaunchStage('hidden');
     }
 
     async function handleEndSession() {
@@ -934,7 +1003,68 @@ export default function ThinkingSessionPage() {
     }
 
     return (
-        <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.16),transparent_22%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_42%,#edf3f7_100%)] px-3 py-3 text-slate-950 sm:px-4 lg:px-5">
+        <div className="relative min-h-screen bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.16),transparent_22%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_42%,#edf3f7_100%)] px-3 py-3 text-slate-950 sm:px-4 lg:px-5">
+            <AnimatePresence>
+                {launchStage !== 'hidden' && (
+                    <motion.div
+                        key={launchStage}
+                        initial={{ opacity: 1 }}
+                        exit={{ opacity: 0, transition: { duration: 0.45 } }}
+                        className={`fixed inset-0 z-50 flex items-center justify-center overflow-hidden ${
+                            sessionMode === 'pro'
+                                ? 'bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.3),transparent_20%),linear-gradient(180deg,#020617_0%,#111827_55%,#1e293b_100%)]'
+                                : 'bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.24),transparent_20%),linear-gradient(180deg,#0f172a_0%,#172554_55%,#0f172a_100%)]'
+                        }`}
+                    >
+                        <motion.div
+                            animate={{ rotate: 360 }}
+                            transition={{ repeat: Infinity, duration: sessionMode === 'pro' ? 10 : 14, ease: 'linear' }}
+                            className="absolute h-[72vw] w-[72vw] rounded-full border border-white/10"
+                        />
+                        <motion.div
+                            animate={{ rotate: -360, scale: [1, 1.06, 1] }}
+                            transition={{ repeat: Infinity, duration: sessionMode === 'pro' ? 7 : 9, ease: 'linear' }}
+                            className="absolute h-[54vw] w-[54vw] rounded-full border border-white/10"
+                        />
+                        <div className="relative px-6 text-center text-white">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.42em] text-white/55">
+                                {sessionMode === 'pro' ? 'Pro Launch' : 'Thinking Launch'}
+                            </p>
+                            <p className="mt-4 text-sm uppercase tracking-[0.24em] text-white/70">{selectedTopic}</p>
+                            <AnimatePresence mode="wait">
+                                {launchStage === 'countdown' ? (
+                                    <motion.div
+                                        key={countdownValue}
+                                        initial={{ opacity: 0, scale: 0.72, filter: 'blur(8px)' }}
+                                        animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
+                                        exit={{ opacity: 0, scale: 1.18, filter: 'blur(10px)' }}
+                                        transition={{ duration: 0.42 }}
+                                        className="mt-5 text-[28vw] font-black leading-none tracking-[-0.08em] sm:text-[18rem]"
+                                    >
+                                        {countdownValue}
+                                    </motion.div>
+                                ) : (
+                                    <motion.div
+                                        key="priming"
+                                        initial={{ opacity: 0, y: 24 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        exit={{ opacity: 0 }}
+                                        className="mt-8"
+                                    >
+                                        <p className="text-4xl font-black uppercase tracking-[0.14em] text-amber-200 sm:text-6xl">
+                                            Think
+                                        </p>
+                                        <p className="mt-4 text-sm leading-7 text-white/72">
+                                            Runtime is priming. Microphone capture starts in one second.
+                                        </p>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             <div className="mx-auto grid max-w-[1720px] gap-3 xl:grid-cols-[1.02fr_1.18fr_0.94fr]">
                 <ProblemPanel problemText={problemText} />
                 <CognitiveIDE
@@ -964,7 +1094,7 @@ export default function ThinkingSessionPage() {
                 />
             </div>
 
-            <div className="mx-auto mt-3 grid max-w-[1720px] gap-3 rounded-[22px] border border-slate-200/80 bg-white/88 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.06)] md:grid-cols-5">
+            <div className="mx-auto mt-3 grid max-w-[1720px] gap-3 rounded-[22px] border border-slate-200/80 bg-white/88 p-3 shadow-[0_16px_50px_rgba(15,23,42,0.06)] md:grid-cols-7">
                 <div className="rounded-2xl bg-slate-50 px-4 py-3">
                     <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Question</p>
                     <p className="mt-1 text-sm font-bold text-slate-900">{Math.max(1, questionNumber - (uiStage === 'question_done' ? 1 : 0))}</p>
@@ -984,6 +1114,14 @@ export default function ThinkingSessionPage() {
                 <div className="rounded-2xl bg-slate-50 px-4 py-3">
                     <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Upload Grace</p>
                     <p className="mt-1 text-sm font-bold text-slate-900">{formatTimer(uploadGraceUsed)} used</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Topic Lock</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{selectedTopic}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Mode</p>
+                    <p className="mt-1 text-sm font-bold capitalize text-slate-900">{sessionMode}</p>
                 </div>
             </div>
         </div>

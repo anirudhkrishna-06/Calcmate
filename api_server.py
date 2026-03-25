@@ -37,7 +37,7 @@ logger = logging.getLogger("MathMendAPI")
 # CONFIG — qwen3.5:397b-cloud via Ollama
 # Run first: ollama run qwen3.5:397b-cloud
 # ---------------------------------------------------------------
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 
 class _OllamaChatCompletions:

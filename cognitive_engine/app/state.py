@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .problem_intelligence import get_random_problem_payload
+from .problem_intelligence import get_problem_payload_for_topic, get_random_problem_payload
 from .contracts import (
     AcousticProfile,
     CognitiveChunk,
@@ -46,6 +46,10 @@ INTENT_TO_PHASE: dict[CognitiveIntent, SessionPhase] = {
 
 def default_problem_payload() -> ProblemPayload:
     return get_random_problem_payload()
+
+
+def topic_problem_payload(topic: str | None) -> ProblemPayload:
+    return get_problem_payload_for_topic(topic)
 
 
 def make_session_state(session_id: str, problem_payload: ProblemPayload) -> SessionState:

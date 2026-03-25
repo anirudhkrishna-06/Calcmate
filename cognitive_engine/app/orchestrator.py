@@ -41,7 +41,7 @@ from .contracts import (
     WebSocketEnvelope,
 )
 from .session_store import store
-from .state import build_timeline_metrics, default_problem_payload, make_session_state, resolve_phase
+from .state import build_timeline_metrics, default_problem_payload, make_session_state, resolve_phase, topic_problem_payload
 from .predictive_analytics import predictive_analytics_service
 from .strategy_validation.solution_graph import build_enriched_solution_graph
 from .strategy_validation.gemini_enhancer import gemini_graph_enhancer
@@ -57,7 +57,8 @@ class SessionOrchestrator:
     async def start_session(self, payload: StartSessionRequest) -> StartSessionResponse:
         session_id = f"session_{uuid4().hex}"
         session_token = f"token_{uuid4().hex}"
-        problem_payload = payload.problem_payload or default_problem_payload()
+        requested_topic = (payload.session_metadata or {}).get("topic")
+        problem_payload = payload.problem_payload or topic_problem_payload(requested_topic) or default_problem_payload()
         state = make_session_state(session_id, problem_payload)
         store.create(state)
         event = EngineEvent(event_type=EngineEventType.SESSION_STARTED, session_id=session_id, payload={"problem_payload": problem_payload.model_dump(mode="json")})

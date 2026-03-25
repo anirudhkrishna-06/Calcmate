@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { Award, Target, GitMerge, Search, AlertTriangle, ArrowRight, CheckCircle2, Lightbulb, Zap, BarChart3, Clock, Loader2, Brain } from 'lucide-react';
 import Navbar from '../components/Navbar';
 import PageTransition from '../components/PageTransition';
-import { API_BASE as API_BASE_URL } from '../config/api';
+import { COGNITIVE_API_BASE as API_BASE_URL } from '../config/api';
 
 export default function ThinkingReportPage() {
     const navigate = useNavigate();
