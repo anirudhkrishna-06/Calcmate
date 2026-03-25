@@ -232,6 +232,14 @@ class SessionOrchestrator:
             time_analysis,
             predictive_analytics,
         )
+        wrong_step_analysis = await report_generator_agent._generate_wrong_step_analysis(
+            state,
+            thinking_graph,
+            metrics,
+            vs,
+            time_analysis,
+            predictive_analytics,
+        )
 
         report = {
             "session_id": session_id,
@@ -244,8 +252,9 @@ class SessionOrchestrator:
             "total_chunks": len(state.chunks),
             "total_interventions": state.intervention_count,
             "validation_state": vs.model_dump(mode="json") if vs else None,
+            "wrong_step_analysis": wrong_step_analysis.model_dump(mode="json"),
             "predictive_analytics": predictive_analytics,
-            "answer_result": None,
+            "answer_result": state.answer_result,
         }
         state.cached_report = report
         store.save(state)

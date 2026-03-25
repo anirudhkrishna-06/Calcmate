@@ -329,6 +329,31 @@ class ValidationState(BaseModel):
     active_deviations: list[str] = Field(default_factory=list, description="Current active deviation reasons")
 
 
+class WrongStepFinding(BaseModel):
+    finding_id: str = Field(default_factory=lambda: f"ws_{uuid4().hex[:10]}")
+    question_number: int | None = None
+    stage: str = Field(default="thinking", description="thinking | solving")
+    title: str = ""
+    observed_issue: str = ""
+    evidence: str = ""
+    why_it_failed: str = ""
+    correction: str = ""
+    guided_question: str = ""
+    hint: str = ""
+    severity: str = "medium"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class WrongStepAnalysis(BaseModel):
+    available: bool = False
+    generated_by: str = "rule_based"
+    summary: str = ""
+    thinking_mistakes: list[WrongStepFinding] = Field(default_factory=list)
+    solving_mistakes: list[WrongStepFinding] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    next_focus: list[str] = Field(default_factory=list)
+
+
 class ContextRefinementResult(BaseModel):
     refined_intent: CognitiveIntent = CognitiveIntent.UNKNOWN
     confidence: float = 0.0
@@ -418,6 +443,7 @@ class SessionState(BaseModel):
     chunks: list[CognitiveChunk] = Field(default_factory=list)
     metrics: dict[str, float] = Field(default_factory=dict)
     cached_report: dict[str, Any] | None = None
+    answer_result: dict[str, Any] | None = None
     deviation_score: float = 0.0
     intervention_count: int = 0
     created_at: datetime = Field(default_factory=utc_now)
@@ -577,9 +603,11 @@ class SessionReport(BaseModel):
     thinking_graph: str = ""
     insight: str = ""
     improvement_rule: str = ""
+    detailed_analysis: str = ""
     total_chunks: int = 0
     total_interventions: int = 0
     validation_state: ValidationState | None = None
+    wrong_step_analysis: WrongStepAnalysis | None = None
     predictive_analytics: dict[str, Any] | None = None
     answer_result: dict[str, Any] | None = None
     generated_at: datetime = Field(default_factory=utc_now)
@@ -597,4 +625,39 @@ class ValidateAnswerResponse(BaseModel):
     expected_answer: str = ""
     ocr_text: str = ""
     explanation: str = ""
+
+
+class StartTutoringSessionRequest(BaseModel):
+    report: dict[str, Any]
+
+
+class TutoringProgress(BaseModel):
+    total_questions: int = 0
+    completed_questions: int = 0
+    current_question_index: int = 0
+    current_title: str = ""
+    current_stage: str = ""
+    ready_for_next: bool = False
+    completed: bool = False
+
+
+class StartTutoringSessionResponse(BaseModel):
+    tutoring_session_id: str
+    available: bool = False
+    intro_message: str = ""
+    assistant_message: str = ""
+    progress: TutoringProgress = Field(default_factory=TutoringProgress)
+
+
+class TutoringChatRequest(BaseModel):
+    tutoring_session_id: str
+    message: str = Field(..., min_length=1)
+
+
+class TutoringChatResponse(BaseModel):
+    tutoring_session_id: str
+    assistant_message: str
+    progress: TutoringProgress = Field(default_factory=TutoringProgress)
+    understanding_status: str = "not_started"
+    completed: bool = False
 

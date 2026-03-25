@@ -61,6 +61,12 @@ class Gemini3Settings(BaseModel):
     timeout_seconds: float = 10.0
 
 
+class Gemini4Settings(BaseModel):
+    api_key: str | None = None
+    model: str = "gemini-2.5-flash-lite"
+    timeout_seconds: float = 8.0
+
+
 class GrokSettings(BaseModel):
     api_key: str | None = None
     model: str = "grok-4.20-reasoning"
@@ -89,6 +95,7 @@ class EngineSettings(BaseModel):
     gemini: GeminiSettings
     gemini2: Gemini2Settings
     gemini3: Gemini3Settings
+    gemini4: Gemini4Settings
     grok: GrokSettings
     ollama: OllamaSettings
     predictive_analytics: PredictiveAnalyticsSettings
@@ -142,8 +149,13 @@ def get_settings() -> EngineSettings:
         model=os.getenv("GEMINI3_MODEL", os.getenv("GEMINI2_MODEL", "gemini-2.0-flash")),
         timeout_seconds=float(os.getenv("GEMINI3_TIMEOUT_SECONDS", "10.0")),
     )
+    gemini4 = Gemini4Settings(
+        api_key=os.getenv("GEMINI4_API_KEY") or os.getenv("gemini4_api_key") or os.getenv("GEMINI3_API_KEY"),
+        model=os.getenv("GEMINI4_MODEL", "gemini-2.5-flash-lite"),
+        timeout_seconds=float(os.getenv("GEMINI4_TIMEOUT_SECONDS", "8.0")),
+    )
     grok = GrokSettings(
-        api_key=os.getenv("GROK_API_KEY"),
+        api_key=os.getenv("GROK_API_KEY") or os.getenv("GROQ_API_KEY"),
         model=os.getenv("GROK_MODEL", "grok-4.20-reasoning"),
         base_url=os.getenv("GROK_BASE_URL", "https://api.x.ai/v1/chat/completions"),
         timeout_seconds=float(os.getenv("GROK_TIMEOUT_SECONDS", "20.0")),
@@ -174,6 +186,7 @@ def get_settings() -> EngineSettings:
         gemini=gemini,
         gemini2=gemini2,
         gemini3=gemini3,
+        gemini4=gemini4,
         grok=grok,
         ollama=ollama,
         predictive_analytics=predictive_analytics,

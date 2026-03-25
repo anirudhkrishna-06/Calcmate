@@ -11,12 +11,17 @@ from .contracts import (
     GenerateReportRequest,
     InterventionEventRequest,
     InterventionEventResponse,
+    StartTutoringSessionRequest,
+    StartTutoringSessionResponse,
     StartSessionRequest,
     StreamAudioChunkRequest,
     ValidateAnswerRequest,
     ValidateAnswerResponse,
+    TutoringChatRequest,
+    TutoringChatResponse,
 )
 from .orchestrator import orchestrator
+from .report_tutoring import tutoring_service
 from .ws_manager import ws_manager
 
 logging.basicConfig(
@@ -131,6 +136,12 @@ async def validate_answer(payload: ValidateAnswerRequest):
         raise HTTPException(status_code=400, detail="No problem text available for this session.")
 
     result = await run_validation(image_bytes, problem_text)
+    async with _store.get_lock(payload.session_id):
+        refreshed_state = _store.get(payload.session_id)
+        if refreshed_state is not None:
+            refreshed_state.answer_result = result
+            refreshed_state.cached_report = None
+            _store.save(refreshed_state)
     logger.info(
         "Answer validated | session=%s correct=%s extracted=%s expected=%s",
         payload.session_id, result.get("correct"), result.get("extracted_answer"), result.get("expected_answer"),
@@ -143,6 +154,19 @@ async def validate_answer(payload: ValidateAnswerRequest):
         ocr_text=result.get("ocr_text", ""),
         explanation=result.get("explanation", ""),
     )
+
+
+@app.post("/start_tutoring_session", response_model=StartTutoringSessionResponse)
+async def start_tutoring_session(payload: StartTutoringSessionRequest):
+    return await tutoring_service.start_session(payload.report)
+
+
+@app.post("/tutoring_chat", response_model=TutoringChatResponse)
+async def tutoring_chat(payload: TutoringChatRequest):
+    try:
+        return await tutoring_service.send_message(payload.tutoring_session_id, payload.message)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.websocket("/ws/session/{session_id}")

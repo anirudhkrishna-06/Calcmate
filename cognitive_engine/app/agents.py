@@ -24,6 +24,8 @@ from .contracts import (
     TranscriptResult,
     TranscriptSegment,
     ValidationState,
+    WrongStepAnalysis,
+    WrongStepFinding,
 )
 from .deepgram_client import transcription_client
 from .llm_refiner import llm_refinement_client
@@ -742,6 +744,14 @@ class ReportGeneratorAgent:
             time_analysis,
             predictive_analytics,
         )
+        wrong_step_analysis = await self._generate_wrong_step_analysis(
+            session_state,
+            thinking_graph,
+            metrics,
+            vs,
+            time_analysis,
+            predictive_analytics,
+        )
 
         report: dict = {
             "status": "Session archived.",
@@ -755,7 +765,9 @@ class ReportGeneratorAgent:
             "time_analysis": time_analysis,
             "timeline_metrics": metrics.model_dump(mode="json"),
             "validation_state": vs.model_dump(mode="json") if vs else None,
+            "wrong_step_analysis": wrong_step_analysis.model_dump(mode="json"),
             "predictive_analytics": predictive_analytics,
+            "answer_result": session_state.answer_result,
         }
 
         logger.info(
@@ -862,6 +874,47 @@ class ReportGeneratorAgent:
             if start != -1 and end != -1 and end > start:
                 return json.loads(raw_text[start : end + 1])
         return {}
+
+    def _normalize_wrong_step_analysis(
+        self,
+        payload: dict,
+        *,
+        question_number: int | None = None,
+        generated_by: str,
+    ) -> WrongStepAnalysis:
+        def _build_findings(items: list[dict], stage: str) -> list[WrongStepFinding]:
+            findings: list[WrongStepFinding] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                findings.append(
+                    WrongStepFinding(
+                        question_number=question_number,
+                        stage=stage,
+                        title=str(item.get("title", "")).strip(),
+                        observed_issue=str(item.get("observed_issue", "")).strip(),
+                        evidence=str(item.get("evidence", "")).strip(),
+                        why_it_failed=str(item.get("why_it_failed", "")).strip(),
+                        correction=str(item.get("correction", "")).strip(),
+                        guided_question=str(item.get("guided_question", "")).strip(),
+                        hint=str(item.get("hint", "")).strip(),
+                        severity=str(item.get("severity", "medium")).strip() or "medium",
+                        confidence=max(0.0, min(1.0, float(item.get("confidence", 0.0) or 0.0))),
+                    )
+                )
+            return [finding for finding in findings if finding.title or finding.observed_issue or finding.guided_question]
+
+        thinking = _build_findings(payload.get("thinking_mistakes", []), "thinking")
+        solving = _build_findings(payload.get("solving_mistakes", []), "solving")
+        return WrongStepAnalysis(
+            available=bool(thinking or solving),
+            generated_by=generated_by,
+            summary=str(payload.get("summary", "")).strip(),
+            thinking_mistakes=thinking,
+            solving_mistakes=solving,
+            strengths=[str(item).strip() for item in payload.get("strengths", []) if str(item).strip()],
+            next_focus=[str(item).strip() for item in payload.get("next_focus", []) if str(item).strip()],
+        )
 
     async def _generate_report_insight(
         self,
@@ -1026,6 +1079,162 @@ class ReportGeneratorAgent:
             predictive_analytics,
         )
 
+    async def _generate_wrong_step_analysis(
+        self,
+        session_state,
+        thinking_graph: str,
+        metrics,
+        vs,
+        time_analysis: dict,
+        predictive_analytics: dict,
+    ) -> WrongStepAnalysis:
+        from .config import get_settings
+        import httpx
+
+        answer_result = session_state.answer_result or {}
+        is_correct = bool(answer_result.get("correct"))
+        if not answer_result:
+            return WrongStepAnalysis(
+                available=False,
+                generated_by="rule_based",
+                summary="No uploaded solution was available, so wrong-step analysis could not be generated.",
+                next_focus=["Upload a written solution to unlock step-level mistake analysis."],
+            )
+
+        if is_correct:
+            return WrongStepAnalysis(
+                available=False,
+                generated_by="rule_based",
+                summary="The uploaded solution matched the expected answer, so no major wrong-step pattern was detected.",
+                strengths=[
+                    "The final submitted answer aligned with the expected result.",
+                    "The report can still be used to inspect pacing, predictive signals, and verification habits.",
+                ],
+                next_focus=["Keep writing the final verification step clearly before uploading."],
+            )
+
+        settings = get_settings()
+        candidates = [
+            {
+                "provider": "GROK",
+                "api_key": settings.grok.api_key,
+                "model": settings.grok.model,
+                "timeout_seconds": settings.grok.timeout_seconds,
+                "kind": "grok",
+                "url": settings.grok.base_url,
+            },
+            {
+                "provider": "GEMINI3",
+                "api_key": settings.gemini3.api_key,
+                "model": settings.gemini3.model,
+                "timeout_seconds": settings.gemini3.timeout_seconds,
+                "kind": "gemini",
+                "url": None,
+            },
+            {
+                "provider": "GEMINI2",
+                "api_key": settings.gemini2.api_key,
+                "model": settings.gemini2.model,
+                "timeout_seconds": settings.gemini2.timeout_seconds,
+                "kind": "gemini",
+                "url": None,
+            },
+        ]
+
+        problem_text = session_state.problem_payload.raw_text if session_state.problem_payload else ""
+        timeline_digest = self._build_timeline_digest(session_state)
+        prompt = (
+            "Analyze where a student's written math solution went wrong. Separate mistakes in THINKING from mistakes in SOLVING.\n\n"
+            f"Problem: {problem_text[:500]}\n"
+            f"Student OCR solution: {answer_result.get('ocr_text', '')[:2500]}\n"
+            f"Extracted student answer: {answer_result.get('extracted_answer', '')}\n"
+            f"Expected answer: {answer_result.get('expected_answer', '')}\n"
+            f"Expected solution summary: {answer_result.get('explanation', '')[:1000]}\n"
+            f"Thinking path: {thinking_graph}\n"
+            f"Timeline metrics: {metrics.model_dump(mode='json')}\n"
+            f"Validation state: {vs.model_dump(mode='json') if vs else {}}\n"
+            f"Time analysis: {time_analysis}\n"
+            f"Predictive analytics: {predictive_analytics}\n"
+            f"Recent chunk digest:\n{timeline_digest}\n\n"
+            "Return valid JSON only with keys "
+            "\"summary\", \"strengths\", \"next_focus\", \"thinking_mistakes\", and \"solving_mistakes\". "
+            "Each item in thinking_mistakes and solving_mistakes must have keys "
+            "\"title\", \"observed_issue\", \"evidence\", \"why_it_failed\", \"correction\", \"guided_question\", \"hint\", \"severity\", and \"confidence\". "
+            "Thinking mistakes must focus on interpretation, plan choice, assumptions, or reasoning path. "
+            "Solving mistakes must focus on algebra, arithmetic, substitution, transformation, or verification execution. "
+            "Be concise, specific, and grounded in the provided solution text."
+        )
+
+        for candidate in candidates:
+            if not candidate["api_key"]:
+                continue
+            try:
+                if candidate["kind"] == "grok":
+                    async with httpx.AsyncClient(timeout=candidate["timeout_seconds"]) as client:
+                        response = await client.post(
+                            candidate["url"],
+                            headers={
+                                "Authorization": f"Bearer {candidate['api_key']}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": candidate["model"],
+                                "temperature": 0.2,
+                                "stream": False,
+                                "messages": [
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You analyze student math work. Return valid JSON only with "
+                                            "\"summary\", \"strengths\", \"next_focus\", "
+                                            "\"thinking_mistakes\", and \"solving_mistakes\"."
+                                        ),
+                                    },
+                                    {"role": "user", "content": prompt},
+                                ],
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                    text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                else:
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{candidate['model']}:generateContent?key={candidate['api_key']}"
+                    )
+                    async with httpx.AsyncClient(timeout=candidate["timeout_seconds"]) as client:
+                        response = await client.post(
+                            url,
+                            json={
+                                "contents": [{"parts": [{"text": prompt}]}],
+                                "generationConfig": {
+                                    "temperature": 0.2,
+                                    "maxOutputTokens": 1200,
+                                    "responseMimeType": "application/json",
+                                },
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                    text = "".join(
+                        part.get("text", "")
+                        for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                    )
+
+                parsed = self._extract_json_payload(text)
+                normalized = self._normalize_wrong_step_analysis(
+                    parsed,
+                    question_number=None,
+                    generated_by=candidate["provider"].lower(),
+                )
+                if normalized.available and normalized.summary:
+                    logger.info("Wrong-step analysis generated successfully | provider=%s", candidate["provider"])
+                    return normalized
+            except Exception as exc:
+                logger.warning("Wrong-step analysis failed | provider=%s error=%s", candidate["provider"], exc)
+
+        return self._fallback_wrong_step_analysis(session_state, vs, answer_result)
+
     def _fallback_insight(
         self,
         session_state,
@@ -1072,6 +1281,83 @@ class ReportGeneratorAgent:
             "improvement_rule": improvement,
             "detailed_analysis": detailed_analysis,
         }
+
+    def _fallback_wrong_step_analysis(self, session_state, vs, answer_result: dict) -> WrongStepAnalysis:
+        thinking_mistakes: list[WrongStepFinding] = []
+        solving_mistakes: list[WrongStepFinding] = []
+        extracted_answer = str(answer_result.get("extracted_answer", "")).strip()
+        expected_answer = str(answer_result.get("expected_answer", "")).strip()
+        explanation = str(answer_result.get("explanation", "")).strip()
+
+        if (vs.deviation_score if vs else 0.0) >= 0.3 or (vs.path_alignment_score if vs else 1.0) < 0.7:
+            thinking_mistakes.append(
+                WrongStepFinding(
+                    stage="thinking",
+                    title="Reasoning path drifted away from the intended method",
+                    observed_issue="The session shows deviation from the most direct solution path.",
+                    evidence=f"Alignment score was {(vs.path_alignment_score if vs else 0.0):.2f} with deviation score {(vs.deviation_score if vs else 0.0):.2f}.",
+                    why_it_failed="A detour in interpretation or plan selection usually makes later calculations less reliable.",
+                    correction="Identify the target quantity and the governing relation before expanding the computation.",
+                    guided_question="Which exact relationship should have been chosen first from the data in the problem?",
+                    hint="Look at the quantities that directly connect the known values to the final unknown.",
+                    severity="high" if (vs.deviation_score if vs else 0.0) >= 0.5 else "medium",
+                    confidence=0.72,
+                )
+            )
+
+        if extracted_answer and expected_answer and extracted_answer != expected_answer:
+            solving_mistakes.append(
+                WrongStepFinding(
+                    stage="solving",
+                    title="Final computation or verification did not match the expected result",
+                    observed_issue=f"The uploaded solution ended at '{extracted_answer}' instead of '{expected_answer}'.",
+                    evidence=explanation[:400],
+                    why_it_failed="Even with a partly correct setup, an incorrect substitution, transformation, or arithmetic step can break the final answer.",
+                    correction="Re-run the substitution and arithmetic carefully, then verify the final value against the original problem statement.",
+                    guided_question="At which exact written line do your numbers stop following the correct method?",
+                    hint="Compare the first line that introduces a new number or transformed expression with the expected calculation.",
+                    severity="high",
+                    confidence=0.81,
+                )
+            )
+
+        if not thinking_mistakes:
+            thinking_mistakes.append(
+                WrongStepFinding(
+                    stage="thinking",
+                    title="Reasoning intent needs a clearer explanation",
+                    observed_issue="The uploaded work does not make the plan choice explicit.",
+                    evidence="The written solution and cognitive trace do not clearly show why one approach was selected.",
+                    why_it_failed="When the plan is implicit, it becomes harder to notice whether the chosen method fits the problem.",
+                    correction="State the target variable and the formula or strategy before starting calculations.",
+                    guided_question="What was the intended plan before you started manipulating numbers?",
+                    hint="Try naming the formula, theorem, or equation family first.",
+                    severity="medium",
+                    confidence=0.58,
+                )
+            )
+
+        summary = (
+            "The answer was incorrect. The main gap appears in the reasoning path, the execution steps, or both."
+            if solving_mistakes or thinking_mistakes
+            else "No decisive wrong-step pattern could be isolated from the uploaded work."
+        )
+        next_focus = [finding.correction for finding in (thinking_mistakes + solving_mistakes)[:2] if finding.correction]
+        strengths = []
+        if (vs.progress_ratio if vs else 0.0) > 0.4:
+            strengths.append("The student still progressed through a meaningful part of the solution path.")
+        if not strengths:
+            strengths.append("The submission provides enough written work to support targeted follow-up tutoring.")
+
+        return WrongStepAnalysis(
+            available=bool(thinking_mistakes or solving_mistakes),
+            generated_by="rule_based",
+            summary=summary,
+            thinking_mistakes=thinking_mistakes,
+            solving_mistakes=solving_mistakes,
+            strengths=strengths,
+            next_focus=next_focus,
+        )
 
 
 problem_structuring_agent = ProblemStructuringAgent()

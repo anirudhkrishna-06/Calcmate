@@ -34,6 +34,67 @@ function normaliseCategory(category) {
     return 'signal';
 }
 
+function normaliseWrongStepAnalysis(analysis, questionNumber = null) {
+    if (!analysis || typeof analysis !== 'object') {
+        return {
+            available: false,
+            summary: '',
+            thinking_mistakes: [],
+            solving_mistakes: [],
+            strengths: [],
+            next_focus: [],
+        };
+    }
+
+    const mapItems = (items, stage) => (Array.isArray(items) ? items : []).map((item, index) => ({
+        ...item,
+        finding_id: item?.finding_id || `ws-${stage}-${questionNumber || 'x'}-${index + 1}`,
+        question_number: item?.question_number || questionNumber,
+        stage: item?.stage || stage,
+    }));
+
+    const thinking = mapItems(analysis.thinking_mistakes, 'thinking');
+    const solving = mapItems(analysis.solving_mistakes, 'solving');
+
+    return {
+        available: Boolean(analysis.available || thinking.length || solving.length),
+        generated_by: analysis.generated_by || 'aggregate',
+        summary: analysis.summary || '',
+        thinking_mistakes: thinking,
+        solving_mistakes: solving,
+        strengths: Array.isArray(analysis.strengths) ? analysis.strengths.filter(Boolean) : [],
+        next_focus: Array.isArray(analysis.next_focus) ? analysis.next_focus.filter(Boolean) : [],
+    };
+}
+
+function buildAggregateWrongStepAnalysis(rounds) {
+    const thinking = [];
+    const solving = [];
+    const strengths = [];
+    const nextFocus = [];
+
+    rounds.forEach((round, index) => {
+        const analysis = normaliseWrongStepAnalysis(round?.report?.wrong_step_analysis, round?.questionNumber || index + 1);
+        thinking.push(...analysis.thinking_mistakes);
+        solving.push(...analysis.solving_mistakes);
+        strengths.push(...analysis.strengths);
+        nextFocus.push(...analysis.next_focus);
+    });
+
+    const totalItems = thinking.length + solving.length;
+    return {
+        available: totalItems > 0,
+        generated_by: 'aggregate',
+        summary: totalItems > 0
+            ? `${totalItems} wrong-step pattern${totalItems === 1 ? '' : 's'} were detected across this session.`
+            : 'No wrong-step pattern was available across the completed reports.',
+        thinking_mistakes: thinking,
+        solving_mistakes: solving,
+        strengths: [...new Set(strengths)],
+        next_focus: [...new Set(nextFocus)],
+    };
+}
+
 function timelineItemFromSocket(data) {
     return {
         id: data.event_id || `evt-${data.timestamp || data.timeLabel || Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
@@ -176,6 +237,17 @@ function buildAggregateReport(rounds, reports) {
             summary: 'Predictive analytics was not available for the completed questions.',
         };
 
+    const aggregateWrongStepAnalysis = buildAggregateWrongStepAnalysis(rounds);
+    const roundsWithAnalysis = rounds.map((round, index) => ({
+        ...round,
+        report: round?.report
+            ? {
+                ...round.report,
+                wrong_step_analysis: normaliseWrongStepAnalysis(round.report.wrong_step_analysis, round.questionNumber || index + 1),
+            }
+            : round?.report || null,
+    }));
+
     return {
         session_type: 'aggregate',
         generated_at: new Date().toISOString(),
@@ -201,16 +273,20 @@ function buildAggregateReport(rounds, reports) {
         improvement_rule: correctAnswers === rounds.length
             ? 'Keep the same rhythm: think first, solve silently, then verify before uploading.'
             : 'Keep separating thinking from solving, and spend a few extra seconds checking the final numeric answer before uploading.',
-        detailed_report: safeReports.map((report, index) => ({
-            question_number: rounds[index]?.questionNumber || index + 1,
-            insight: report?.insight || '',
-            improvement_rule: report?.improvement_rule || '',
-            detailed_analysis: report?.detailed_analysis || '',
-            time_analysis: report?.time_analysis || null,
-            predictive_analytics: report?.predictive_analytics || null,
-        })),
+        detailed_report: roundsWithAnalysis
+            .filter((round) => round?.report)
+            .map((round, index) => ({
+                question_number: round?.questionNumber || index + 1,
+                insight: round?.report?.insight || '',
+                improvement_rule: round?.report?.improvement_rule || '',
+                detailed_analysis: round?.report?.detailed_analysis || '',
+                time_analysis: round?.report?.time_analysis || null,
+                predictive_analytics: round?.report?.predictive_analytics || null,
+                wrong_step_analysis: round?.report?.wrong_step_analysis || null,
+            })),
+        wrong_step_analysis: aggregateWrongStepAnalysis,
         predictive_analytics: predictiveAnalytics,
-        rounds,
+        rounds: roundsWithAnalysis,
     };
 }
 

@@ -165,26 +165,28 @@ export default function CognitiveIDE({
                                 initial={{ opacity: 0, y: 12 }}
                                 animate={{ opacity: 1, y: 0 }}
                                 exit={{ opacity: 0, y: -12 }}
-                                className="flex h-full flex-col items-center justify-center gap-5"
+                                className="flex h-full w-full flex-col"
                             >
-                                <div className="relative">
-                                    <ThinkingPulse active />
-                                </div>
-                                <div className="w-full max-w-xl rounded-[24px] border border-white/8 bg-slate-950/24 px-5 py-5">
-                                    <div className="flex h-28 items-end justify-center gap-2 rounded-[20px] border border-white/8 bg-white/5 px-5 py-6">
-                                        {waveform.map((level, index) => (
-                                            <motion.span
-                                                key={index}
-                                                animate={{ height: `${level}%`, opacity: level > 12 ? 1 : 0.28 }}
-                                                transition={{ duration: 0.18, ease: 'easeOut' }}
-                                                className="w-2 rounded-full bg-gradient-to-t from-amber-300 via-rose-300 to-sky-200"
-                                                style={{ minHeight: '12px' }}
-                                            />
-                                        ))}
+                                <div className="flex-1" />
+
+                                <div className="flex items-center justify-center">
+                                    <div className="w-full max-w-xl rounded-[24px] border border-white/8 bg-slate-950/24 px-5 py-5">
+                                        <div className="flex h-28 items-end justify-center gap-2 rounded-[20px] border border-white/8 bg-white/5 px-5 py-6">
+                                            {waveform.map((level, index) => (
+                                                <motion.span
+                                                    key={index}
+                                                    animate={{ height: `${level}%`, opacity: level > 12 ? 1 : 0.28 }}
+                                                    transition={{ duration: 0.18, ease: 'easeOut' }}
+                                                    className="w-2 rounded-full bg-gradient-to-t from-amber-300 via-rose-300 to-sky-200"
+                                                    style={{ minHeight: '12px' }}
+                                                />
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
 
-                                <div className="flex flex-wrap items-center justify-center gap-3">
+                                <div className="flex flex-1 items-end justify-center pb-1 pt-5">
+                                    <div className="flex flex-wrap items-center justify-center gap-3">
                                     <button
                                         onClick={onStartSolving}
                                         className="inline-flex items-center gap-3 rounded-full bg-emerald-300 px-8 py-3.5 text-sm font-semibold uppercase tracking-[0.22em] text-slate-950 transition hover:bg-emerald-200"
@@ -200,6 +202,7 @@ export default function CognitiveIDE({
                                         <Square size={14} />
                                         End Session
                                     </button>
+                                    </div>
                                 </div>
                             </motion.div>
                         )}
