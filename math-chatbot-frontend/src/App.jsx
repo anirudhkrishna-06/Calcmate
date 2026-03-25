@@ -7,10 +7,12 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
+import TeacherDashboardPage from './pages/TeacherDashboardPage';
 import ChatbotPage from './pages/ChatbotPage';
 import ProfilePage from './pages/ProfilePage';
 import QuizPage from './pages/QuizPage';
 import StreakPage from './pages/StreakPage';
+import ContestsPage from './pages/ContestsPage';
 import ThinkingSetupPage from './pages/ThinkingSetupPage';
 import ThinkingSessionPage from './pages/ThinkingSessionPage';
 import ThinkingReportPage from './pages/ThinkingReportPage';
@@ -18,8 +20,8 @@ import ThinkingReportPage from './pages/ThinkingReportPage';
 import './index.css';
 
 // Protected Route wrapper
-function ProtectedRoute({ children }) {
-  const { isAuthenticated, isLoading } = useAuth();
+function ProtectedRoute({ children, allowedRoles }) {
+  const { isAuthenticated, isLoading, user } = useAuth();
 
   if (isLoading) {
     return (
@@ -33,12 +35,16 @@ function ProtectedRoute({ children }) {
     return <Navigate to="/login" replace />;
   }
 
+  if (allowedRoles && user && !allowedRoles.includes(user.role)) {
+    return <Navigate to={user.role === 'teacher' ? '/teacher-dashboard' : '/student-dashboard'} replace />;
+  }
+
   return children;
 }
 
 // Public-only route (redirects authenticated users to dashboard)
 function PublicRoute({ children }) {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, user } = useAuth();
 
   if (isLoading) {
     return (
@@ -49,10 +55,17 @@ function PublicRoute({ children }) {
   }
 
   if (isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={user?.role === 'teacher' ? '/teacher-dashboard' : '/student-dashboard'} replace />;
   }
 
   return children;
+}
+
+// Fallback auto route
+function DashboardRedirect() {
+  const { user } = useAuth();
+  if (user?.role === 'teacher') return <Navigate to="/teacher-dashboard" replace />;
+  return <Navigate to="/student-dashboard" replace />;
 }
 
 function AppRoutes() {
@@ -79,10 +92,26 @@ function AppRoutes() {
 
         {/* Protected Routes */}
         <Route
+          path="/student-dashboard"
+          element={
+            <ProtectedRoute allowedRoles={['student']}>
+              <DashboardPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/teacher-dashboard"
+          element={
+            <ProtectedRoute allowedRoles={['teacher']}>
+              <TeacherDashboardPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/dashboard"
           element={
             <ProtectedRoute>
-              <DashboardPage />
+              <DashboardRedirect />
             </ProtectedRoute>
           }
         />
@@ -107,6 +136,14 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <QuizPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/contests"
+          element={
+            <ProtectedRoute>
+              <ContestsPage />
             </ProtectedRoute>
           }
         />

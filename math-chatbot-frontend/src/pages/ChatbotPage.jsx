@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -16,34 +16,44 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import Navbar from '../components/Navbar';
+import { API_BASE } from '../config/api';
+import {
+    createClientId,
+    deleteUserChat,
+    getRecentChats,
+    saveUserChat,
+    sortUserChats,
+    syncUserAnalyticsFromChats,
+    syncUserStreakFromChats,
+} from '../services/userData';
+import { classifyMathTopic } from '../services/topicIntelligence';
 
-// Generate a unique ID
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+const readErrorMessage = async (response, fallbackMessage) => {
+    const contentType = response.headers.get('content-type') || '';
 
-// Chat session storage helpers
-const STORAGE_KEY = 'mathmend_chat_sessions';
-
-const loadSessions = () => {
     try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    } catch {
-        return [];
-    }
-};
+        if (contentType.includes('application/json')) {
+            const payload = await response.json();
+            return payload.detail || payload.error || payload.message || fallbackMessage;
+        }
 
-const saveSessions = (sessions) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+        const text = await response.text();
+        return text || fallbackMessage;
+    } catch {
+        return fallbackMessage;
+    }
 };
 
 export default function ChatbotPage() {
     const { user } = useAuth();
     const [searchParams, setSearchParams] = useSearchParams();
 
-    const [sessions, setSessions] = useState(loadSessions);
+    const [sessions, setSessions] = useState([]);
     const [activeSessionId, setActiveSessionId] = useState(null);
     const [messages, setMessages] = useState([]);
     const [inputText, setInputText] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [isHistoryLoading, setIsHistoryLoading] = useState(true);
     const [selectedImage, setSelectedImage] = useState(null);
     const [imagePreview, setImagePreview] = useState(null);
     const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -51,18 +61,71 @@ export default function ChatbotPage() {
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const inputRef = useRef(null);
+    const liveTopicInsight = useMemo(() => classifyMathTopic(inputText), [inputText]);
 
-    // Load session from URL query
+    useEffect(() => {
+        let isMounted = true;
+
+        const loadChats = async () => {
+            if (!user?.id) {
+                if (isMounted) {
+                    setSessions([]);
+                    setMessages([]);
+                    setActiveSessionId(null);
+                    setIsHistoryLoading(false);
+                }
+                return;
+            }
+
+            setIsHistoryLoading(true);
+
+            try {
+                const chats = await getRecentChats(user.id, 100);
+                if (!isMounted) return;
+
+                setSessions(chats);
+
+                const requestedSessionId = searchParams.get('session');
+                const selectedChat = requestedSessionId
+                    ? chats.find((session) => session.id === requestedSessionId)
+                    : chats.find((session) => session.id === activeSessionId);
+
+                if (selectedChat) {
+                    setActiveSessionId(selectedChat.id);
+                    setMessages(selectedChat.messages || []);
+                } else if (requestedSessionId) {
+                    setSearchParams({});
+                    setActiveSessionId(null);
+                    setMessages([]);
+                }
+            } catch (error) {
+                console.error('Error loading chat history:', error);
+            } finally {
+                if (isMounted) {
+                    setIsHistoryLoading(false);
+                }
+            }
+        };
+
+        loadChats();
+
+        return () => {
+            isMounted = false;
+        };
+    }, [user?.id]);
+
     useEffect(() => {
         const sessionId = searchParams.get('session');
-        if (sessionId) {
-            const found = sessions.find((s) => s.id === sessionId);
-            if (found) {
-                setActiveSessionId(found.id);
-                setMessages(found.messages || []);
-            }
+        if (!sessionId) {
+            return;
         }
-    }, []);
+
+        const found = sessions.find((session) => session.id === sessionId);
+        if (found) {
+            setActiveSessionId(found.id);
+            setMessages(found.messages || []);
+        }
+    }, [searchParams, sessions]);
 
     // Scroll to bottom
     const scrollToBottom = useCallback(() => {
@@ -73,26 +136,50 @@ export default function ChatbotPage() {
         scrollToBottom();
     }, [messages, scrollToBottom]);
 
-    // Persist sessions
-    const persistSessions = useCallback(
-        (updatedSessions) => {
-            setSessions(updatedSessions);
-            saveSessions(updatedSessions);
-        },
-        []
-    );
+    const updateSessionsState = useCallback((session) => {
+        setSessions((currentSessions) =>
+            sortUserChats([
+                session,
+                ...currentSessions.filter((existingSession) => existingSession.id !== session.id),
+            ])
+        );
+    }, []);
+
+    const createEmptySession = useCallback(() => ({
+        id: createClientId(),
+        title: 'New conversation',
+        messages: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    }), []);
+
+    const persistSession = useCallback(async (session, allSessionsOverride) => {
+        if (!user?.id) return session;
+
+        const savedSession = await saveUserChat(user.id, session);
+        const nextSessions = sortUserChats(
+            allSessionsOverride
+                ? allSessionsOverride.map((item) => (item.id === savedSession.id ? savedSession : item))
+                : [
+                    savedSession,
+                    ...sessions.filter((existingSession) => existingSession.id !== savedSession.id),
+                ]
+        );
+
+        setSessions(nextSessions);
+        await Promise.all([
+            syncUserStreakFromChats(user.id, nextSessions),
+            syncUserAnalyticsFromChats(user.id, nextSessions),
+        ]);
+        return savedSession;
+    }, [sessions, user?.id]);
 
     // Create new chat
-    const createNewChat = () => {
-        const newSession = {
-            id: uid(),
-            title: 'New conversation',
-            messages: [],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-        };
-        const updated = [newSession, ...sessions];
-        persistSessions(updated);
+    const createNewChat = async () => {
+        const newSession = createEmptySession();
+        updateSessionsState(newSession);
+        await persistSession(newSession);
+        setSearchParams({ session: newSession.id });
         setActiveSessionId(newSession.id);
         setMessages([]);
         setInputText('');
@@ -102,6 +189,7 @@ export default function ChatbotPage() {
 
     // Load a session
     const loadSession = (session) => {
+        setSearchParams({ session: session.id });
         setActiveSessionId(session.id);
         setMessages(session.messages || []);
         setInputText('');
@@ -109,14 +197,35 @@ export default function ChatbotPage() {
     };
 
     // Delete a session
-    const deleteSession = (e, sessionId) => {
+    const deleteSession = async (e, sessionId) => {
         e.stopPropagation();
-        const updated = sessions.filter((s) => s.id !== sessionId);
-        persistSessions(updated);
+
+        const updatedSessions = sessions.filter((session) => session.id !== sessionId);
+        setSessions(updatedSessions);
+
         if (activeSessionId === sessionId) {
+            setSearchParams({});
             setActiveSessionId(null);
             setMessages([]);
         }
+
+        try {
+            if (user?.id) {
+                await deleteUserChat(user.id, sessionId);
+                await Promise.all([
+                    syncUserStreakFromChats(user.id, updatedSessions),
+                    syncUserAnalyticsFromChats(user.id, updatedSessions),
+                ]);
+            }
+        } catch (error) {
+            console.error('Error deleting session:', error);
+        }
+    };
+
+    const clearImage = () => {
+        setSelectedImage(null);
+        setImagePreview(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
     // Handle image upload
@@ -133,10 +242,14 @@ export default function ChatbotPage() {
             setIsLoading(true);
             const formData = new FormData();
             formData.append('image', file);
-            const response = await fetch('http://localhost:8000/ocr', {
+            const response = await fetch(`${API_BASE}/ocr`, {
                 method: 'POST',
                 body: formData,
             });
+            if (!response.ok) {
+                const message = await readErrorMessage(response, `OCR request failed with status ${response.status}.`);
+                throw new Error(message);
+            }
             const data = await response.json();
             setInputText(data.extracted_text || data.extractedText || data.text || '');
         } catch (error) {
@@ -146,91 +259,104 @@ export default function ChatbotPage() {
         }
     };
 
-    const clearImage = () => {
-        setSelectedImage(null);
-        setImagePreview(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-    };
-
     // Send message
     const handleSendMessage = async () => {
         if (!inputText.trim() || isLoading) return;
 
-        // Auto-create session if none
-        let currentId = activeSessionId;
-        let currentSessions = [...sessions];
-        if (!currentId) {
-            const newSession = {
-                id: uid(),
-                title: inputText.trim().slice(0, 60),
-                messages: [],
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-            };
-            currentSessions = [newSession, ...currentSessions];
-            currentId = newSession.id;
-            setActiveSessionId(currentId);
-        }
-
+        const questionText = inputText.trim();
+        const messageTimestamp = new Date().toISOString();
+        const topicInsight = classifyMathTopic(questionText);
         const userMsg = {
-            id: uid(),
+            id: createClientId(),
             type: 'user',
-            content: inputText.trim(),
-            timestamp: new Date().toISOString(),
+            role: 'user',
+            content: questionText,
+            text: questionText,
+            timestamp: messageTimestamp,
+            topicTag: topicInsight.topicTag,
+            topicConfidence: topicInsight.confidence,
         };
 
-        const newMessages = [...messages, userMsg];
+        const baseSession =
+            sessions.find((session) => session.id === activeSessionId) ||
+            {
+                ...createEmptySession(),
+                title: questionText.slice(0, 60),
+            };
+
+        const sessionId = baseSession.id;
+        const newMessages = [...(baseSession.messages || messages), userMsg];
+        const optimisticSession = {
+            ...baseSession,
+            title:
+                (baseSession.messages || []).length === 0
+                    ? questionText.slice(0, 60)
+                    : baseSession.title || questionText.slice(0, 60),
+            messages: newMessages,
+            updatedAt: messageTimestamp,
+        };
+
+        setActiveSessionId(sessionId);
+        setSearchParams({ session: sessionId });
         setMessages(newMessages);
         setInputText('');
         clearImage();
         setIsLoading(true);
-
-        // Update session title if first message
-        const sessionIdx = currentSessions.findIndex((s) => s.id === currentId);
-        if (sessionIdx !== -1 && currentSessions[sessionIdx].messages.length === 0) {
-            currentSessions[sessionIdx].title = userMsg.content.slice(0, 60);
-        }
+        updateSessionsState(optimisticSession);
 
         try {
-            const response = await fetch('http://localhost:8000/chat', {
+            await persistSession(optimisticSession);
+
+            const response = await fetch(`${API_BASE}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ question: userMsg.content }),
             });
+            if (!response.ok) {
+                const message = await readErrorMessage(response, `Chat request failed with status ${response.status}.`);
+                throw new Error(message);
+            }
             const data = await response.json();
 
             const botMsg = {
-                id: uid(),
+                id: createClientId(),
                 type: 'bot',
+                role: 'bot',
                 content: data.answer || data.response || 'Sorry, I could not process your request.',
+                text: data.answer || data.response || 'Sorry, I could not process your request.',
                 timestamp: new Date().toISOString(),
             };
 
             const finalMessages = [...newMessages, botMsg];
-            setMessages(finalMessages);
+            const finalSession = {
+                ...optimisticSession,
+                messages: finalMessages,
+                updatedAt: botMsg.timestamp,
+            };
 
-            // Persist
-            if (sessionIdx !== -1) {
-                currentSessions[sessionIdx].messages = finalMessages;
-                currentSessions[sessionIdx].updatedAt = new Date().toISOString();
-            }
-            persistSessions(currentSessions);
+            setMessages(finalMessages);
+            updateSessionsState(finalSession);
+            await persistSession(finalSession);
         } catch (error) {
             console.error('Chat Error:', error);
             const errMsg = {
-                id: uid(),
+                id: createClientId(),
                 type: 'bot',
-                content: 'Sorry, there was an error connecting to the server. Please ensure the backend is running.',
+                role: 'bot',
+                content: `Backend error: ${error.message || `Unable to reach ${API_BASE}`}`,
+                text: `Backend error: ${error.message || `Unable to reach ${API_BASE}`}`,
                 timestamp: new Date().toISOString(),
             };
             const finalMessages = [...newMessages, errMsg];
-            setMessages(finalMessages);
+            const finalSession = {
+                ...optimisticSession,
+                messages: finalMessages,
+                updatedAt: errMsg.timestamp,
+            };
 
-            if (sessionIdx !== -1) {
-                currentSessions[sessionIdx].messages = finalMessages;
-                currentSessions[sessionIdx].updatedAt = new Date().toISOString();
-            }
-            persistSessions(currentSessions);
+            setMessages(finalMessages);
+            updateSessionsState(finalSession);
+            await persistSession(finalSession);
         } finally {
             setIsLoading(false);
         }
@@ -300,7 +426,12 @@ export default function ChatbotPage() {
 
                             {/* Session list */}
                             <div className="flex-1 overflow-y-auto py-2">
-                                {sessions.length === 0 ? (
+                                {isHistoryLoading ? (
+                                    <div className="px-4 py-8 text-center">
+                                        <Loader2 size={20} className="text-gray-300 mx-auto mb-2 animate-spin" />
+                                        <p className="text-xs text-gray-400">Loading conversations</p>
+                                    </div>
+                                ) : sessions.length === 0 ? (
                                     <div className="px-4 py-8 text-center">
                                         <MessageSquare size={24} className="text-gray-300 mx-auto mb-2" />
                                         <p className="text-xs text-gray-400">No conversations yet</p>
@@ -427,6 +558,11 @@ export default function ChatbotPage() {
                                             <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
                                                 {msg.content}
                                             </div>
+                                            {msg.type === 'user' && msg.topicTag && (
+                                                <div className="mt-2 inline-flex items-center rounded-full bg-blue-500/20 px-2.5 py-1 text-[10px] font-medium text-blue-100">
+                                                    {msg.topicTag}
+                                                </div>
+                                            )}
                                             <div
                                                 className={`text-[10px] mt-2 ${msg.type === 'user' ? 'text-blue-200' : 'text-gray-400'
                                                     }`}
@@ -539,6 +675,17 @@ export default function ChatbotPage() {
                                 </motion.button>
                             </div>
 
+                            {inputText.trim() && (
+                                <div className="mt-3 flex items-center justify-center">
+                                    <div className="inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-[11px] text-blue-700">
+                                        <span className="font-semibold">Detected topic</span>
+                                        <span>{liveTopicInsight.topicTag}</span>
+                                        <span className="text-blue-400">
+                                            {Math.round((liveTopicInsight.confidence || 0) * 100)}%
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
                             <p className="text-[10px] text-gray-400 mt-2 text-center">
                                 Press Enter to send · Shift+Enter for new line
                             </p>

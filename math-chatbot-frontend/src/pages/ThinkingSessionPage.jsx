@@ -3,9 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import ProblemPanel from '../components/cognitive/ProblemPanel';
 import CognitiveIDE from '../components/cognitive/CognitiveIDE';
 import TimelinePanel from '../components/cognitive/TimelinePanel';
-
-const API_BASE_URL = 'http://127.0.0.1:8000';
-const WS_BASE_URL = 'ws://127.0.0.1:8000';
+import { API_BASE as API_BASE_URL, WS_BASE as WS_BASE_URL } from '../config/api';
 const CHUNK_DURATION_MS = 5000;
 const ANALYSER_FFT_SIZE = 2048;
 const MIN_VOICE_THRESHOLD = 0.01;

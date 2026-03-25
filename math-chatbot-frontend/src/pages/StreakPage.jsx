@@ -1,100 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { Flame, Calendar, TrendingUp, Target, Zap } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import Navbar from '../components/Navbar';
 import PageTransition from '../components/PageTransition';
-
-const STREAK_KEY = 'mathmend_streak';
-const SESSIONS_KEY = 'mathmend_chat_sessions';
-
-function getStreakData() {
-    try {
-        const data = JSON.parse(localStorage.getItem(STREAK_KEY) || '{}');
-        return {
-            currentStreak: data.currentStreak || 0,
-            longestStreak: data.longestStreak || 0,
-            activeDays: data.activeDays || [],
-            totalProblems: data.totalProblems || 0,
-        };
-    } catch {
-        return { currentStreak: 0, longestStreak: 0, activeDays: [], totalProblems: 0 };
-    }
-}
-
-function computeFromSessions() {
-    try {
-        const sessions = JSON.parse(localStorage.getItem(SESSIONS_KEY) || '[]');
-        const daySet = new Set();
-        let totalProblems = 0;
-
-        sessions.forEach((s) => {
-            if (s.messages) {
-                s.messages.forEach((m) => {
-                    if (m.type === 'user') {
-                        totalProblems++;
-                        const d = new Date(m.timestamp).toISOString().slice(0, 10);
-                        daySet.add(d);
-                    }
-                });
-            }
-        });
-
-        const sortedDays = Array.from(daySet).sort();
-
-        // Calculate current streak
-        let currentStreak = 0;
-        let longestStreak = 0;
-        let tempStreak = 0;
-        const today = new Date().toISOString().slice(0, 10);
-
-        if (sortedDays.length > 0) {
-            // Check if today or yesterday is in the set for current streak
-            const todayDate = new Date();
-            const checkDate = new Date(todayDate);
-
-            // Count backwards from today
-            for (let i = 0; i < 365; i++) {
-                const dateStr = checkDate.toISOString().slice(0, 10);
-                if (daySet.has(dateStr)) {
-                    currentStreak++;
-                    checkDate.setDate(checkDate.getDate() - 1);
-                } else if (i === 0) {
-                    // Today not active yet, check from yesterday
-                    checkDate.setDate(checkDate.getDate() - 1);
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            // Longest streak
-            for (let i = 0; i < sortedDays.length; i++) {
-                if (i === 0) {
-                    tempStreak = 1;
-                } else {
-                    const prev = new Date(sortedDays[i - 1]);
-                    const curr = new Date(sortedDays[i]);
-                    const diff = (curr - prev) / 86400000;
-                    tempStreak = diff === 1 ? tempStreak + 1 : 1;
-                }
-                longestStreak = Math.max(longestStreak, tempStreak);
-            }
-        }
-
-        // Save computed data
-        const streakData = {
-            currentStreak,
-            longestStreak,
-            activeDays: sortedDays,
-            totalProblems,
-        };
-        localStorage.setItem(STREAK_KEY, JSON.stringify(streakData));
-
-        return streakData;
-    } catch {
-        return { currentStreak: 0, longestStreak: 0, activeDays: [], totalProblems: 0 };
-    }
-}
+import { getUserStreak, listUserChats, syncUserStreakFromChats } from '../services/userData';
 
 // Generate calendar grid for last 20 weeks (140 days)
 function generateCalendarGrid(activeDays) {
@@ -117,12 +27,43 @@ function generateCalendarGrid(activeDays) {
 }
 
 export default function StreakPage() {
+    const { user } = useAuth();
     const [streakData, setStreakData] = useState({ currentStreak: 0, longestStreak: 0, activeDays: [], totalProblems: 0 });
 
     useEffect(() => {
-        const data = computeFromSessions();
-        setStreakData(data);
-    }, []);
+        let isMounted = true;
+
+        const loadStreak = async () => {
+            if (!user?.id) return;
+
+            try {
+                const savedStreak = await getUserStreak(user.id);
+                let resolvedStreak = savedStreak;
+
+                if (!savedStreak.updatedAt) {
+                    const chats = await listUserChats(user.id, 100);
+                    resolvedStreak = await syncUserStreakFromChats(user.id, chats);
+                }
+
+                if (!isMounted) return;
+
+                setStreakData({
+                    currentStreak: resolvedStreak.currentStreak || 0,
+                    longestStreak: resolvedStreak.longestStreak || 0,
+                    activeDays: resolvedStreak.activeDays || [],
+                    totalProblems: resolvedStreak.totalSolved || 0,
+                });
+            } catch (error) {
+                console.error('Error loading streak data:', error);
+            }
+        };
+
+        loadStreak();
+
+        return () => {
+            isMounted = false;
+        };
+    }, [user?.id]);
 
     const calendarGrid = useMemo(
         () => generateCalendarGrid(streakData.activeDays),

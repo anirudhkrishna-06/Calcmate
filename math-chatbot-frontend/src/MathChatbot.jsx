@@ -1,5 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Image as ImageIcon, X, Loader2 } from 'lucide-react';
+import { API_BASE } from './config/api';
+
+const readErrorMessage = async (response, fallbackMessage) => {
+  const contentType = response.headers.get('content-type') || '';
+
+  try {
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      return payload.detail || payload.error || payload.message || fallbackMessage;
+    }
+
+    const text = await response.text();
+    return text || fallbackMessage;
+  } catch {
+    return fallbackMessage;
+  }
+};
 
 const MathChatbot = () => {
   const [messages, setMessages] = useState([]);
@@ -39,15 +56,19 @@ const MathChatbot = () => {
       formData.append('image', file);
 
       // Replace with your actual OCR endpoint
-      const response = await fetch('http://localhost:8000/ocr', {
+      const response = await fetch(`${API_BASE}/ocr`, {
         method: 'POST',
         body: formData,
       });
+      if (!response.ok) {
+        const message = await readErrorMessage(response, `OCR request failed with status ${response.status}.`);
+        throw new Error(message);
+      }
 
       const data = await response.json();
       
       // Populate the extracted text in the input area
-      setInputText(data.extractedText || data.text || '');
+      setInputText(data.extracted_text || data.extractedText || data.text || '');
       setIsLoading(false);
     } catch (error) {
       console.error('OCR Error:', error);
@@ -83,7 +104,7 @@ const MathChatbot = () => {
 
     try {
       // Replace with your actual chatbot endpoint
-      const response = await fetch('http://localhost:8000/chat', {
+      const response = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -92,6 +113,10 @@ const MathChatbot = () => {
           question: userMessage.content,
         }),
       });
+      if (!response.ok) {
+        const message = await readErrorMessage(response, `Chat request failed with status ${response.status}.`);
+        throw new Error(message);
+      }
 
       const data = await response.json();
 
@@ -108,7 +133,7 @@ const MathChatbot = () => {
       const errorMessage = {
         id: Date.now() + 1,
         type: 'bot',
-        content: 'Sorry, there was an error processing your request. Please try again.',
+        content: `Backend error: ${error.message || `Unable to reach ${API_BASE}`}`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMessage]);

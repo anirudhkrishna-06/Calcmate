@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Brain, CheckCircle2, XCircle, ArrowRight, BarChart2,
@@ -6,8 +7,9 @@ import {
 } from 'lucide-react';
 import Navbar from '../components/Navbar';
 import PageTransition from '../components/PageTransition';
-
-const API_BASE = 'http://localhost:8000';
+import { API_BASE } from '../config/api';
+import { useAuth } from '../context/AuthContext';
+import { getUserNotification, recordQuizAttempt } from '../services/classroomData';
 
 // ─── Topic label formatter ───────────────────────────────────────────────────
 const formatTopic = (t) =>
@@ -59,6 +61,8 @@ function ResultBadge({ correct }) {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function QuizPage() {
+    const { user } = useAuth();
+    const [searchParams] = useSearchParams();
     // ── State ────────────────────────────────────────────────────────────────
     const [view, setView] = useState('start'); // start | quiz | result | dashboard
     const [batchSize, setBatchSize] = useState(5);
@@ -71,6 +75,9 @@ export default function QuizPage() {
     const [submitted, setSubmitted] = useState(false);
     const [lastResult, setLastResult] = useState(null); // {correct, solution}
     const [batchScore, setBatchScore] = useState(0);
+    const [attemptLog, setAttemptLog] = useState([]);
+    const [assignmentNotice, setAssignmentNotice] = useState(null);
+    const [isSavingAttempt, setIsSavingAttempt] = useState(false);
 
     const [stats, setStats] = useState(null); // mastery per topic
     const [loading, setLoading] = useState(false);
@@ -84,6 +91,30 @@ export default function QuizPage() {
             inputRef.current.focus();
         }
     }, [qIndex, submitted, view]);
+
+    useEffect(() => {
+        let isMounted = true;
+
+        const loadAssignment = async () => {
+            const notificationId = searchParams.get('notification');
+            if (!notificationId || !user?.id) return;
+
+            try {
+                const notification = await getUserNotification(user.id, notificationId);
+                if (notification && isMounted) {
+                    setAssignmentNotice(notification);
+                }
+            } catch (error) {
+                console.error('Error loading quiz assignment:', error);
+            }
+        };
+
+        loadAssignment();
+
+        return () => {
+            isMounted = false;
+        };
+    }, [searchParams, user?.id]);
 
     // ── Start session ─────────────────────────────────────────────────────────
     const startSession = async () => {
@@ -101,6 +132,7 @@ export default function QuizPage() {
             setQuestions(data.questions);
             setQIndex(0);
             setBatchScore(0);
+            setAttemptLog([]);
             setAnswer('');
             setSubmitted(false);
             setLastResult(null);
@@ -133,6 +165,14 @@ export default function QuizPage() {
             const data = await res.json();
             setLastResult(data);
             setSubmitted(true);
+            setAttemptLog((log) => [
+                ...log,
+                {
+                    questionIndex: qIndex,
+                    topic: currentQ.topic,
+                    correct: !!data.correct,
+                },
+            ]);
             if (data.correct) setBatchScore((s) => s + 1);
         } catch (e) {
             setError(e.message);
@@ -142,6 +182,41 @@ export default function QuizPage() {
     };
 
     // ── Next question or finish ───────────────────────────────────────────────
+    const finalizeQuizAttempt = async (finalScore = batchScore) => {
+        if (!user?.id || !sessionId) return;
+
+        const topicBreakdown = Object.values(
+            attemptLog.reduce((accumulator, item) => {
+                const key = item.topic;
+                accumulator[key] = accumulator[key] || { topic: key, correct: 0, total: 0 };
+                accumulator[key].total += 1;
+                accumulator[key].correct += item.correct ? 1 : 0;
+                return accumulator;
+            }, {})
+        ).map((topic) => ({
+            ...topic,
+            percentage: topic.total > 0 ? Math.round((topic.correct / topic.total) * 100) : 0,
+        }));
+
+        setIsSavingAttempt(true);
+        try {
+            await recordQuizAttempt(user.id, {
+                source: assignmentNotice ? 'teacher_notification' : 'self_practice',
+                notificationId: assignmentNotice?.id || null,
+                teacherId: assignmentNotice?.teacherId || null,
+                sessionId,
+                score: finalScore,
+                totalQuestions: questions.length,
+                percentage: questions.length > 0 ? Math.round((finalScore / questions.length) * 100) : 0,
+                topicBreakdown,
+            });
+        } catch (error) {
+            console.error('Error recording quiz attempt:', error);
+        } finally {
+            setIsSavingAttempt(false);
+        }
+    };
+
     const nextQuestion = () => {
         if (qIndex + 1 < questions.length) {
             setQIndex((i) => i + 1);
@@ -149,6 +224,7 @@ export default function QuizPage() {
             setSubmitted(false);
             setLastResult(null);
         } else {
+            finalizeQuizAttempt(batchScore);
             fetchStats();
             setView('result');
         }
@@ -201,6 +277,14 @@ export default function QuizPage() {
                             Our AI tracks your strengths and weak spots in real time using
                             Bayesian learning — spending more time where you need it most.
                         </p>
+
+                        {assignmentNotice && (
+                            <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50 px-4 py-4 text-left">
+                                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-500">Assigned By Teacher</p>
+                                <p className="text-sm font-semibold text-blue-900 mt-2">{assignmentNotice.title}</p>
+                                <p className="text-sm text-blue-700 mt-2 leading-relaxed">{assignmentNotice.body}</p>
+                            </div>
+                        )}
 
                         {/* Feature pills */}
                         <div className="flex flex-wrap gap-2 mb-8">
@@ -424,9 +508,9 @@ export default function QuizPage() {
                         </div>
 
                         {/* Action buttons */}
-                        <div className="flex gap-3">
-                            <button
-                                onClick={() => { setView('start'); setError(''); }}
+	                        <div className="flex gap-3">
+	                            <button
+	                                onClick={() => { setView('start'); setError(''); }}
                                 className="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl transition-colors text-sm"
                             >
                                 <RefreshCw size={15} />
@@ -437,10 +521,13 @@ export default function QuizPage() {
                                 className="flex-1 flex items-center justify-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 rounded-xl transition-colors text-sm"
                             >
                                 <BarChart2 size={15} />
-                                View Progress
-                            </button>
-                        </div>
-                    </motion.div>
+	                                View Progress
+	                            </button>
+	                        </div>
+	                        {isSavingAttempt && (
+	                            <p className="text-xs text-gray-400 mt-4">Saving quiz attempt to your analytics…</p>
+	                        )}
+	                    </motion.div>
 
                     {/* Quick mastery preview */}
                     {stats && (
