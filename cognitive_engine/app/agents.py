@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 
 from .context_engine import context_window_engine
@@ -19,6 +20,7 @@ from .contracts import (
     LLMRefinementResult,
     ProblemPayload,
     SemanticIntentResult,
+    SessionPhase,
     SessionState,
     SessionReport,
     TranscriptResult,
@@ -28,11 +30,11 @@ from .contracts import (
     WrongStepFinding,
 )
 from .deepgram_client import transcription_client
-from .llm_refiner import llm_refinement_client
 from .problem_intelligence import problem_structuring_pipeline
 from .problem_intelligence.concept_mapper import detect_concepts_from_text
 from .predictive_analytics import predictive_analytics_service
 from .semantic_rules import classify_semantic_intent
+from .sentence_segmenter import segment_transcript_result
 from .state import (
     apply_context_refinement,
     apply_llm_refinement,
@@ -148,7 +150,7 @@ class TranscriptionAgent:
             )
 
         sentence_events: list[EngineEvent] = []
-        segments = transcript_result.segments or []
+        segments = segment_transcript_result(transcript_result)
         if segments:
             chunk_start = float(payload.get("start_time") or 0.0)
             for index, segment in enumerate(segments, start=1):
@@ -257,13 +259,27 @@ class LLMRefinementAgent:
         if event.event_type != EngineEventType.CONTEXT_REFINED:
             return []
         chunk = CognitiveChunk.model_validate(event.payload["chunk"])
-        should_use_llm = chunk.certainty == IntentCertainty.AMBIGUOUS or chunk.ambiguity_score >= 0.55
-        llm_result = LLMRefinementResult(used=False)
-        final_chunk = chunk
-        if should_use_llm:
-            llm_result = await llm_refinement_client.refine(current_chunk=chunk, session_state=session_state)
-            if llm_result.used and llm_result.intent is not None:
-                final_chunk = apply_llm_refinement(chunk, refined_intent=llm_result.intent, confidence=llm_result.confidence, certainty=llm_result.certainty, reason=llm_result.reason, used=True)
+        llm_result = LLMRefinementResult(
+            used=False,
+            reason="chunk_level_llm_disabled",
+            error="Chunk-level refinement now uses local lexical and temporal smoothing only.",
+        )
+        final_chunk = apply_llm_refinement(
+            chunk,
+            refined_intent=chunk.intent_refined,
+            confidence=chunk.refined_confidence,
+            certainty=chunk.certainty,
+            reason="local_context_refinement",
+            used=False,
+        )
+        logger.info(
+            "Chunk refinement finalized locally | session=%s chunk=%s intent=%s certainty=%s ambiguity=%.2f",
+            event.session_id,
+            chunk.chunk_id,
+            final_chunk.intent_refined.value,
+            final_chunk.certainty.value,
+            final_chunk.ambiguity_score,
+        )
         return [EngineEvent(event_type=EngineEventType.LLM_REFINEMENT_COMPLETED, session_id=event.session_id, payload={"chunk": final_chunk.model_dump(mode="json"), "llm_result": llm_result.model_dump(mode="json")})]
 
 
@@ -302,15 +318,52 @@ class TimelineEngineAgent:
         CognitiveIntent.UNKNOWN: ("signal", "Thinking..."),
     }
 
+    _LABEL_VARIANTS = {
+        CognitiveIntent.PROBLEM_UNDERSTANDING: ("Understanding the problem", "Framing the question", "Clarifying what is being asked", "Reading the problem carefully"),
+        CognitiveIntent.PARAMETER_RECOGNITION: ("Identifying values", "Picking out the givens", "Noting the known quantities", "Spotting the important numbers"),
+        CognitiveIntent.CONCEPTUAL_EXPLANATION: ("Good conceptual thinking", "Explaining the idea clearly", "Connecting the concept", "Reasoning through the concept"),
+        CognitiveIntent.WORKING_MEMORY_RETRIEVAL: ("Recalling relevant knowledge", "Searching memory for the method", "Pulling in a known formula", "Remembering a useful relation"),
+        CognitiveIntent.STRATEGY_SELECTION: ("Strategy identified", "Choosing a method", "Committing to an approach", "Method selection in progress"),
+        CognitiveIntent.COMPARISON_ANALYSIS: ("Comparing approaches", "Weighing possible methods", "Testing an alternative route", "Checking which method fits best"),
+        CognitiveIntent.DEVIATION: ("Exploring a different approach", "Moving away from the main path", "Trying a riskier direction", "Method drift detected"),
+        CognitiveIntent.EXECUTION_START: ("Starting to solve", "Putting the plan into action", "Beginning the calculation", "Applying the chosen method"),
+        CognitiveIntent.VERIFICATION: ("Checking the answer", "Verifying the result", "Reviewing the final step", "Confirming the solution"),
+        CognitiveIntent.SOLUTION_SUMMARY: ("Wrapping up the solution", "Summarizing the result", "Final answer coming together", "Closing the solution"),
+        CognitiveIntent.ERROR_CORRECTION: ("Self-correction â€” good catch!", "Fixing a mistake", "Adjusting the solution path", "Repairing an earlier step"),
+        CognitiveIntent.META_COGNITION: ("Reflecting on the approach", "Thinking about the plan", "Monitoring the reasoning", "Stepping back to evaluate"),
+        CognitiveIntent.STUCK_STATE: ("Seems stuck â€” take a step back", "Hit a point of uncertainty", "Reasoning stalled for a moment", "Needs a clearer next step"),
+        CognitiveIntent.CONFIDENCE_EXPRESSION: ("Feeling confident", "Confidence is building", "Sounds sure about the step", "Expressing certainty"),
+        CognitiveIntent.SILENCE_REFLECTION: ("Taking a moment to think", "Silent reflection", "Pausing before the next step", "Holding the thought before solving"),
+        CognitiveIntent.UNKNOWN: ("Thinking...", "Collecting the next thought", "Working through the idea", "Processing the next move"),
+    }
+
+    def _select_message(self, chunk: CognitiveChunk, session_state: SessionState) -> tuple[str, str]:
+        category, default_message = self._LABEL_MAP.get(chunk.intent_refined, ("signal", "Thinking..."))
+        variants = self._LABEL_VARIANTS.get(chunk.intent_refined, (default_message,))
+        transcript = (chunk.transcript or "").strip()
+        if chunk.intent_refined == CognitiveIntent.UNKNOWN and transcript:
+            return "signal", "Student observation"
+
+        message = variants[(len(session_state.timeline) + len(session_state.chunks)) % len(variants)]
+        if chunk.intent_refined == CognitiveIntent.PARAMETER_RECOGNITION and chunk.semantic_signals.problem_keyword_hits:
+            message = f"Tracking givens: {', '.join(chunk.semantic_signals.problem_keyword_hits[:2])}"
+        elif chunk.intent_refined == CognitiveIntent.STRATEGY_SELECTION and chunk.semantic_signals.formula_references:
+            message = f"Formula focus: {chunk.semantic_signals.formula_references[0]}"
+        elif chunk.intent_refined == CognitiveIntent.COMPARISON_ANALYSIS and chunk.exploration_valid:
+            message = "Exploring valid alternatives"
+        elif chunk.intent_refined == CognitiveIntent.EXECUTION_START and transcript:
+            message = "Applying the setup"
+        elif chunk.intent_refined == CognitiveIntent.VERIFICATION and transcript:
+            message = "Rechecking the final logic"
+        elif chunk.intent_refined == CognitiveIntent.SILENCE_REFLECTION and session_state.phase == SessionPhase.STRATEGY:
+            message = "Holding the strategy in mind"
+        return category, message
+
     async def process(self, event: EngineEvent, session_state: SessionState) -> list[EngineEvent]:
         if event.event_type != EngineEventType.INTENT_CLASSIFIED:
             return []
         chunk = CognitiveChunk.model_validate(event.payload["chunk"])
-        category, message = self._LABEL_MAP.get(chunk.intent_refined, ("signal", "Thinking..."))
-
-        # Slightly adjust message based on context
-        if chunk.intent_refined == CognitiveIntent.UNKNOWN and chunk.transcript:
-            message = "Student observation"
+        category, message = self._select_message(chunk, session_state)
 
         # Detail shows ONLY the transcript for frontend — keep it simple
         detail = f'"{chunk.transcript}"' if chunk.transcript else ""
@@ -412,10 +465,15 @@ class StrategyValidatorAgent:
         # 6. Conditional events based on metric thresholds
         low_signal_off_graph = (
             (not path_node.is_on_graph and path_node.node_label.startswith("off_graph:silence_or_filler"))
-            or (chunk.transcript is not None and len(chunk.transcript.split()) <= 2)
+            or (chunk.transcript is not None and len(chunk.transcript.split()) <= 3)
+            or chunk.semantic_signals.filler_only
+            or chunk.exploration_valid
+            or session_state.phase in {SessionPhase.UNDERSTANDING, SessionPhase.STRATEGY}
         )
 
-        if validation_state.deviation_score >= 0.40 and not low_signal_off_graph:
+        stable_reasoning_chunk = bool(chunk.transcript and len(chunk.transcript.split()) >= 4 and not chunk.semantic_signals.filler_only)
+
+        if validation_state.deviation_score >= 0.52 and not low_signal_off_graph and stable_reasoning_chunk:
             deviation_type = (
                 DeviationType.HARD_DEVIATION.value
                 if not path_node.is_on_graph
@@ -445,7 +503,7 @@ class StrategyValidatorAgent:
                 chunk.transcript,
             )
 
-        if validation_state.delay_score >= 0.50:
+        if validation_state.delay_score >= 0.62 and len(path.nodes) >= 3:
             events.append(EngineEvent(
                 event_type=EngineEventType.DELAY_DETECTED,
                 session_id=event.session_id,
@@ -458,7 +516,7 @@ class StrategyValidatorAgent:
             ))
             validation_logger.log_delay_trigger(chunk.chunk_id, validation_state.delay_score)
 
-        if validation_state.inefficiency_score >= 0.40:
+        if validation_state.inefficiency_score >= 0.48 and len(path.nodes) >= 4:
             events.append(EngineEvent(
                 event_type=EngineEventType.INEFFICIENCY_DETECTED,
                 session_id=event.session_id,
@@ -717,6 +775,111 @@ class InterventionAgent:
 
 
 class ReportGeneratorAgent:
+    def _grok_model_candidates(self, configured_model: str | None) -> list[str]:
+        configured = (configured_model or "").strip()
+        normalized = "grok-4-1-fast-reasoning" if configured == "grok-4.20-reasoning" else configured
+        ordered = [normalized, "grok-4-1-fast-reasoning", "grok-4-fast-reasoning", "grok-4"]
+        unique: list[str] = []
+        for model in ordered:
+            if model and model not in unique:
+                unique.append(model)
+        return unique
+
+    async def _call_grok_chat(
+        self,
+        *,
+        session_id: str,
+        url: str,
+        api_key: str,
+        configured_model: str,
+        timeout_seconds: float,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        purpose: str,
+    ) -> str:
+        import asyncio
+        import httpx
+
+        last_error: Exception | None = None
+        for model_name in self._grok_model_candidates(configured_model):
+            payload = {
+                "model": model_name,
+                "temperature": temperature,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+            logger.info(
+                "Grok request prepared | session=%s purpose=%s model=%s payload=%s",
+                session_id,
+                purpose,
+                model_name,
+                json.dumps(payload, ensure_ascii=True, indent=2)[:2000],
+            )
+            for attempt in range(2):
+                try:
+                    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                        response = await client.post(
+                            url,
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                    logger.info(
+                        "Grok request succeeded | session=%s purpose=%s model=%s attempt=%d",
+                        session_id,
+                        purpose,
+                        model_name,
+                        attempt + 1,
+                    )
+                    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                except httpx.HTTPStatusError as exc:
+                    body = exc.response.text[:1200] if exc.response is not None else "<no body>"
+                    status_code = exc.response.status_code if exc.response is not None else "<unknown>"
+                    logger.warning(
+                        "Grok request failed | session=%s purpose=%s model=%s attempt=%d status=%s body=%s",
+                        session_id,
+                        purpose,
+                        model_name,
+                        attempt + 1,
+                        status_code,
+                        body,
+                    )
+                    if status_code in {401, 403}:
+                        logger.error(
+                            "Grok authentication failed | session=%s purpose=%s model=%s detail=Check GROK_API_KEY in .env and xAI console",
+                            session_id,
+                            purpose,
+                            model_name,
+                        )
+                    last_error = exc
+                    if exc.response is not None and status_code in {400, 401, 403}:
+                        break
+                    if attempt == 0:
+                        await asyncio.sleep(1.5)
+                except Exception as exc:
+                    logger.warning(
+                        "Grok request failed | session=%s purpose=%s model=%s attempt=%d error=%s",
+                        session_id,
+                        purpose,
+                        model_name,
+                        attempt + 1,
+                        exc,
+                    )
+                    last_error = exc
+                    if attempt == 0:
+                        await asyncio.sleep(1.5)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Grok model candidates available.")
     """Phase 9 — Generates intelligent session reports with Gemini-powered insights."""
 
     async def process(self, event: EngineEvent, session_state: SessionState) -> list[EngineEvent]:
@@ -783,7 +946,10 @@ class ReportGeneratorAgent:
         )]
 
     def _build_time_analysis(self, session_state, metrics) -> dict:
+        from .state import build_phase_spans
+
         chunks = session_state.chunks
+        phase_spans = build_phase_spans(session_state)
 
         def first_time(intent_names: set[str]) -> float | None:
             for chunk in chunks:
@@ -816,6 +982,34 @@ class ReportGeneratorAgent:
             "deviation_time_seconds": metrics.deviation_time_seconds,
             "execution_time_seconds": metrics.execution_time_seconds,
             "verification_time_seconds": metrics.verification_time_seconds,
+            "phase_spans": [
+                {
+                    "phase": span["phase"].value,
+                    "start_time": round(float(span["start_time"]), 2),
+                    "end_time": round(float(span["end_time"]), 2),
+                    "duration_seconds": round(float(span["duration_seconds"]), 2),
+                    "chunk_count": len(span["chunk_ids"]),
+                    "micro_chunks": span["micro_chunks"],
+                    "deviation_observed": bool(span["has_deviation"]),
+                }
+                for span in phase_spans
+            ],
+            "mapping_time_seconds": round(
+                sum(
+                    float(span["duration_seconds"])
+                    for span in phase_spans
+                    if span["phase"] == SessionPhase.STRATEGY
+                ),
+                2,
+            ),
+            "decision_time_seconds": round(
+                sum(
+                    float(span["duration_seconds"])
+                    for span in phase_spans
+                    if span["phase"] == SessionPhase.REFLECTION
+                ),
+                2,
+            ),
         }
 
     def _build_thinking_graph(self, path) -> str:
@@ -928,8 +1122,25 @@ class ReportGeneratorAgent:
         """Use Grok first, then Gemini, to generate report insights."""
         from .config import get_settings
         import httpx
+        from .llm_budget import llm_budget_controller
 
         settings = get_settings()
+        total_duration = sum(max(chunk.timestamp.end_time - chunk.timestamp.start_time, 0.0) for chunk in session_state.chunks)
+        if len(session_state.chunks) < settings.report_min_chunks or total_duration < settings.report_min_duration_seconds:
+            logger.info(
+                "Report insight skipped | session=%s chunks=%d duration=%.1f reason=below_threshold",
+                session_state.session_id,
+                len(session_state.chunks),
+                total_duration,
+            )
+            return self._fallback_insight(
+                session_state,
+                thinking_graph,
+                vs,
+                time_analysis,
+                predictive_analytics,
+            )
+
         candidates = [
             {
                 "provider": "GROK",
@@ -939,23 +1150,28 @@ class ReportGeneratorAgent:
                 "kind": "grok",
                 "url": settings.grok.base_url,
             },
-            {
-                "provider": "GEMINI3",
-                "api_key": settings.gemini3.api_key,
-                "model": settings.gemini3.model,
-                "timeout_seconds": settings.gemini3.timeout_seconds,
-                "kind": "gemini",
-                "url": None,
-            },
-            {
-                "provider": "GEMINI2",
-                "api_key": settings.gemini2.api_key,
-                "model": settings.gemini2.model,
-                "timeout_seconds": settings.gemini2.timeout_seconds,
-                "kind": "gemini",
-                "url": None,
-            },
         ]
+        if settings.report_allow_gemini_fallback:
+            candidates.extend(
+                [
+                    {
+                        "provider": "GEMINI3",
+                        "api_key": settings.gemini3.api_key,
+                        "model": settings.gemini3.model,
+                        "timeout_seconds": settings.gemini3.timeout_seconds,
+                        "kind": "gemini",
+                        "url": None,
+                    },
+                    {
+                        "provider": "GEMINI2",
+                        "api_key": settings.gemini2.api_key,
+                        "model": settings.gemini2.model,
+                        "timeout_seconds": settings.gemini2.timeout_seconds,
+                        "kind": "gemini",
+                        "url": None,
+                    },
+                ]
+            )
 
         problem_text = session_state.problem_payload.raw_text if session_state.problem_payload else ""
         timeline_digest = self._build_timeline_digest(session_state)
@@ -991,43 +1207,26 @@ class ReportGeneratorAgent:
             timeout_seconds = candidate["timeout_seconds"]
             if not api_key:
                 continue
+            if not llm_budget_controller.consume(session_state.session_id, reason=f"report_insight_{provider.lower()}"):
+                logger.info("Report insight skipped provider | session=%s provider=%s reason=budget", session_state.session_id, provider)
+                break
             try:
                 if candidate["kind"] == "grok":
-                    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                        response = await client.post(
-                            candidate["url"],
-                            headers={
-                                "Authorization": f"Bearer {api_key}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": model,
-                                "temperature": 0.35,
-                                "stream": False,
-                                "messages": [
-                                    {
-                                        "role": "system",
-                                        "content": (
-                                            "You generate math thinking-session reports. "
-                                            "Return valid JSON only with keys "
-                                            "\"insight\", \"improvement_rule\", and "
-                                            "\"detailed_analysis\"."
-                                        ),
-                                    },
-                                    {
-                                        "role": "user",
-                                        "content": prompt,
-                                    },
-                                ],
-                            },
-                        )
-                        response.raise_for_status()
-                        data = response.json()
-
-                    text = (
-                        data.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
+                    text = await self._call_grok_chat(
+                        session_id=session_state.session_id,
+                        url=candidate["url"],
+                        api_key=api_key,
+                        configured_model=model,
+                        timeout_seconds=timeout_seconds,
+                        system_prompt=(
+                            "You generate math thinking-session reports. "
+                            "Return valid JSON only with keys "
+                            "\"insight\", \"improvement_rule\", and "
+                            "\"detailed_analysis\"."
+                        ),
+                        user_prompt=prompt,
+                        temperature=0.35,
+                        purpose="report_insight",
                     )
                 else:
                     url = (
@@ -1090,6 +1289,7 @@ class ReportGeneratorAgent:
     ) -> WrongStepAnalysis:
         from .config import get_settings
         import httpx
+        from .llm_budget import llm_budget_controller
 
         answer_result = session_state.answer_result or {}
         is_correct = bool(answer_result.get("correct"))
@@ -1123,23 +1323,28 @@ class ReportGeneratorAgent:
                 "kind": "grok",
                 "url": settings.grok.base_url,
             },
-            {
-                "provider": "GEMINI3",
-                "api_key": settings.gemini3.api_key,
-                "model": settings.gemini3.model,
-                "timeout_seconds": settings.gemini3.timeout_seconds,
-                "kind": "gemini",
-                "url": None,
-            },
-            {
-                "provider": "GEMINI2",
-                "api_key": settings.gemini2.api_key,
-                "model": settings.gemini2.model,
-                "timeout_seconds": settings.gemini2.timeout_seconds,
-                "kind": "gemini",
-                "url": None,
-            },
         ]
+        if settings.report_allow_gemini_fallback:
+            candidates.extend(
+                [
+                    {
+                        "provider": "GEMINI3",
+                        "api_key": settings.gemini3.api_key,
+                        "model": settings.gemini3.model,
+                        "timeout_seconds": settings.gemini3.timeout_seconds,
+                        "kind": "gemini",
+                        "url": None,
+                    },
+                    {
+                        "provider": "GEMINI2",
+                        "api_key": settings.gemini2.api_key,
+                        "model": settings.gemini2.model,
+                        "timeout_seconds": settings.gemini2.timeout_seconds,
+                        "kind": "gemini",
+                        "url": None,
+                    },
+                ]
+            )
 
         problem_text = session_state.problem_payload.raw_text if session_state.problem_payload else ""
         timeline_digest = self._build_timeline_digest(session_state)
@@ -1168,35 +1373,26 @@ class ReportGeneratorAgent:
         for candidate in candidates:
             if not candidate["api_key"]:
                 continue
+            if not llm_budget_controller.consume(session_state.session_id, reason=f"wrong_step_{candidate['provider'].lower()}"):
+                logger.info("Wrong-step analysis skipped provider | session=%s provider=%s reason=budget", session_state.session_id, candidate["provider"])
+                break
             try:
                 if candidate["kind"] == "grok":
-                    async with httpx.AsyncClient(timeout=candidate["timeout_seconds"]) as client:
-                        response = await client.post(
-                            candidate["url"],
-                            headers={
-                                "Authorization": f"Bearer {candidate['api_key']}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": candidate["model"],
-                                "temperature": 0.2,
-                                "stream": False,
-                                "messages": [
-                                    {
-                                        "role": "system",
-                                        "content": (
-                                            "You analyze student math work. Return valid JSON only with "
-                                            "\"summary\", \"strengths\", \"next_focus\", "
-                                            "\"thinking_mistakes\", and \"solving_mistakes\"."
-                                        ),
-                                    },
-                                    {"role": "user", "content": prompt},
-                                ],
-                            },
-                        )
-                        response.raise_for_status()
-                        data = response.json()
-                    text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    text = await self._call_grok_chat(
+                        session_id=session_state.session_id,
+                        url=candidate["url"],
+                        api_key=candidate["api_key"],
+                        configured_model=candidate["model"],
+                        timeout_seconds=candidate["timeout_seconds"],
+                        system_prompt=(
+                            "You analyze student math work. Return valid JSON only with "
+                            "\"summary\", \"strengths\", \"next_focus\", "
+                            "\"thinking_mistakes\", and \"solving_mistakes\"."
+                        ),
+                        user_prompt=prompt,
+                        temperature=0.2,
+                        purpose="wrong_step_analysis",
+                    )
                 else:
                     url = (
                         "https://generativelanguage.googleapis.com/v1beta/models/"

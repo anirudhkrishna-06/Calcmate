@@ -125,6 +125,10 @@ class MetricsEngine:
             + invalid_ratio * 0.30
             + alignment_penalty * 0.30
         )
+        if len(path.nodes) <= 3:
+            score *= 0.55
+        elif len(path.nodes) <= 5:
+            score *= 0.75
         return min(max(score, 0.0), 1.0)
 
     def compute_delay_score(
@@ -183,6 +187,8 @@ class MetricsEngine:
             + step_delay_ratio * 0.35
             + silence_ratio * 0.25
         )
+        if len(path.nodes) <= 3:
+            score *= 0.7
         return min(max(score, 0.0), 1.0)
 
     def compute_inefficiency_score(
@@ -235,6 +241,8 @@ class MetricsEngine:
         detour_penalty = min(detour_ratio, 0.30)
 
         score = method_penalty + repeated_penalty + detour_penalty
+        if len(path.nodes) <= 4:
+            score *= 0.7
         return min(max(score, 0.0), 1.0)
 
     def compute_oscillation_index(self, path: CognitivePath) -> float:
@@ -284,6 +292,8 @@ class MetricsEngine:
         bf_penalty = min(back_and_forths * 0.15, 0.40)
 
         score = raw_ratio * 0.60 + bf_penalty
+        if len(method_sequence) <= 3:
+            score *= 0.65
         return min(max(score, 0.0), 1.0)
 
     def compute_path_alignment_score(self, alignment: AlignmentResult) -> float:

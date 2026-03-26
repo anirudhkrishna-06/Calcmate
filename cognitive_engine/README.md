@@ -84,6 +84,7 @@ Optional behavior:
 - `COGNITIVE_STORE_AUDIO=true` stores chunk audio under `cognitive_engine/data/audio/`
 - near-silent chunks are skipped before Deepgram calls to reduce API usage
 - repeated identical audio blobs are cached by hash to avoid duplicate transcription calls
+- for `DEEPGRAM_MODEL=nova-3`, the engine sends boosted terms with `keyterm` rather than `keywords`
 
 ## Gemini parser setup
 

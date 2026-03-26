@@ -65,11 +65,12 @@ class DeepgramTranscriptionClient:
                 error="DEEPGRAM_API_KEY is not configured.",
             )
 
+        requested_keyword_boosting = self.settings.use_keywords or bool(keywords)
         try:
             payload = await self._request_transcription(
                 audio_bytes=audio_bytes,
                 mime_type=mime_type,
-                use_keywords=self.settings.use_keywords or bool(keywords),
+                use_keyword_boosting=requested_keyword_boosting,
                 extra_keywords=keywords or [],
             )
         except httpx.HTTPStatusError as exc:
@@ -81,15 +82,15 @@ class DeepgramTranscriptionClient:
                 exc.response.status_code if exc.response is not None else "<unknown>",
                 response_text[:500],
             )
-            if self.settings.use_keywords:
+            if requested_keyword_boosting:
                 try:
                     payload = await self._request_transcription(
                         audio_bytes=audio_bytes,
                         mime_type=mime_type,
-                        use_keywords=False,
+                        use_keyword_boosting=False,
                         extra_keywords=[],
                     )
-                    logger.info("Deepgram retry succeeded without keywords | session=%s chunk=%s", session_id, chunk_id)
+                    logger.info("Deepgram retry succeeded without keyword boosting | session=%s chunk=%s", session_id, chunk_id)
                 except Exception as retry_exc:
                     logger.exception("Deepgram transcription retry failed | session=%s chunk=%s error=%s", session_id, chunk_id, retry_exc)
                     return TranscriptResult(provider="deepgram", model=self.settings.model, skipped=False, error=str(retry_exc))
@@ -116,7 +117,7 @@ class DeepgramTranscriptionClient:
         *,
         audio_bytes: bytes,
         mime_type: str | None,
-        use_keywords: bool,
+        use_keyword_boosting: bool,
         extra_keywords: list[str],
     ) -> dict[str, Any]:
         params: list[tuple[str, Any]] = [
@@ -128,10 +129,11 @@ class DeepgramTranscriptionClient:
             ("filler_words", str(self.settings.filler_words).lower()),
             ("diarize", str(self.settings.diarize).lower()),
         ]
-        if use_keywords:
+        if use_keyword_boosting:
             merged_keywords = list(dict.fromkeys([*self.settings.keywords, *extra_keywords]))
+            keyword_param = self._keyword_param_name()
             for keyword in merged_keywords[:20]:
-                params.append(("keywords", keyword))
+                params.append((keyword_param, keyword))
 
         headers = {
             "Authorization": f"Token {self.settings.api_key}",
@@ -147,6 +149,10 @@ class DeepgramTranscriptionClient:
             )
             response.raise_for_status()
             return response.json()
+
+    def _keyword_param_name(self) -> str:
+        model_name = (self.settings.model or "").strip().lower()
+        return "keyterm" if model_name.startswith("nova-3") else "keywords"
 
     def _parse_response(self, payload: dict[str, Any]) -> TranscriptResult:
         results = payload.get("results") or {}

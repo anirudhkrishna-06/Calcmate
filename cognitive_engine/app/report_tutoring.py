@@ -13,6 +13,7 @@ from .contracts import (
     TutoringChatResponse,
     TutoringProgress,
 )
+from .llm_budget import llm_budget_controller
 
 logger = logging.getLogger("cognitive_engine.report_tutoring")
 
@@ -37,6 +38,7 @@ def _extract_json(raw_text: str) -> dict[str, Any]:
 class ReportTutoringService:
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
+        self._active_session_id: str | None = None
 
     def _flatten_items(self, report: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -61,6 +63,7 @@ class ReportTutoringService:
                             "guided_question": str(raw_item.get("guided_question", "")).strip(),
                             "hint": str(raw_item.get("hint", "")).strip(),
                             "attempts": 0,
+                            "question_label": f"Question {raw_item.get('question_number') or question_number or 1}",
                         }
                     )
 
@@ -73,6 +76,32 @@ class ReportTutoringService:
             add_analysis(report.get("wrong_step_analysis"), None)
 
         return [item for item in items if item["guided_question"] or item["title"]]
+
+    def _build_ability_profile(self, report: dict[str, Any]) -> dict[str, Any]:
+        timeline = report.get("timeline_metrics") or {}
+        validation = report.get("validation_state") or {}
+        predictive = report.get("predictive_analytics") or {}
+        understanding = float(timeline.get("understanding_time_seconds", 0.0) or 0.0)
+        strategy = float(timeline.get("strategy_delay_seconds", 0.0) or 0.0)
+        execution = float(timeline.get("execution_time_seconds", 0.0) or 0.0)
+        confusion = float(predictive.get("confusion_probability", 0.0) or 0.0)
+        alignment = float(validation.get("path_alignment_score", 0.0) or 0.0)
+
+        if confusion >= 0.45 or alignment < 0.35:
+            tone = "gentle"
+        elif understanding + strategy > execution + 12:
+            tone = "supportive"
+        else:
+            tone = "direct"
+
+        return {
+            "tone": tone,
+            "understanding_time_seconds": understanding,
+            "strategy_time_seconds": strategy,
+            "execution_time_seconds": execution,
+            "confusion_probability": confusion,
+            "alignment_score": alignment,
+        }
 
     def _progress(self, session: dict[str, Any]) -> TutoringProgress:
         items = session["items"]
@@ -94,7 +123,7 @@ class ReportTutoringService:
         prompt = item.get("guided_question") or f"What should be corrected in the {item.get('stage', 'thinking')} here?"
         hint = item.get("hint") or "Use the problem's givens and the target unknown to rebuild the step."
         return (
-            f"{question_label}, {stage_label.lower()} focus: {item.get('title', 'Wrong step')}.\n"
+            f"{question_label}. {stage_label} focus: {item.get('title', 'Wrong step')}.\n"
             f"{prompt}\n"
             f"Clue: {hint}"
         )
@@ -111,8 +140,11 @@ class ReportTutoringService:
         for label, api_key, model, timeout_seconds in candidates:
             if not api_key:
                 continue
+            if not llm_budget_controller.consume(self._active_session_id, reason=f"tutoring_{label.lower()}"):
+                return {}, "Session LLM budget exhausted."
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             try:
+                logger.info("Tutoring model request | session=%s provider=%s prompt_chars=%d", self._active_session_id, label, len(prompt))
                 async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                     response = await client.post(
                         url,
@@ -133,6 +165,7 @@ class ReportTutoringService:
                 )
                 parsed = _extract_json(raw_text)
                 if parsed:
+                    logger.info("Tutoring model response parsed | session=%s provider=%s", self._active_session_id, label)
                     return parsed, label
                 last_error = f"{label} returned invalid JSON."
             except Exception as exc:
@@ -154,7 +187,7 @@ class ReportTutoringService:
             return {
                 "understanding_status": "solid",
                 "should_advance": True,
-                "assistant_message": "That explanation shows the right correction and why the original step broke the solution.",
+                "assistant_message": "That explains both the mistake and the fix clearly.",
             }
         return {
             "understanding_status": "partial" if len(student_message.split()) >= 10 else "not_yet",
@@ -168,6 +201,7 @@ class ReportTutoringService:
     async def start_session(self, report: dict[str, Any]) -> StartTutoringSessionResponse:
         items = self._flatten_items(report or {})
         tutoring_session_id = f"tutor_{uuid4().hex}"
+        llm_budget_controller.reset(tutoring_session_id)
 
         session = {
             "report": report or {},
@@ -175,8 +209,16 @@ class ReportTutoringService:
             "current_index": 0,
             "history": [],
             "ready_for_next": False,
+            "ability_profile": self._build_ability_profile(report or {}),
+            "completed_questions": set(),
         }
         self._sessions[tutoring_session_id] = session
+        logger.info(
+            "Tutoring session started | session=%s items=%d tone=%s",
+            tutoring_session_id,
+            len(items),
+            session["ability_profile"]["tone"],
+        )
 
         if not items:
             progress = self._progress(session)
@@ -195,7 +237,7 @@ class ReportTutoringService:
             available=True,
             intro_message=(
                 f"I found {len(items)} wrong-step target{'s' if len(items) != 1 else ''} in your report. "
-                "We'll unlock them one by one, and we only move forward after your explanation shows the idea is clear."
+                "We'll clear them question by question. We only move on after your explanation is convincing."
             ),
             assistant_message=first_question,
             progress=progress,
@@ -205,6 +247,7 @@ class ReportTutoringService:
         session = self._sessions.get(tutoring_session_id)
         if session is None:
             raise KeyError("Tutoring session not found.")
+        self._active_session_id = tutoring_session_id
 
         items = session["items"]
         if session["current_index"] >= len(items):
@@ -219,12 +262,26 @@ class ReportTutoringService:
 
         item = items[session["current_index"]]
         item["attempts"] = int(item.get("attempts", 0)) + 1
+        logger.info(
+            "Tutoring turn received | session=%s index=%d question=%s stage=%s attempts=%d chars=%d",
+            tutoring_session_id,
+            session["current_index"],
+            item.get("question_number"),
+            item.get("stage"),
+            item["attempts"],
+            len(message),
+        )
+        ability_profile = session.get("ability_profile", {})
+        recent_history = session["history"][-3:]
 
         prompt = (
             "You are a post-report math tutor. The learner must explain why their wrong step was wrong and how to do it right. "
-            "Use short clues and short coaching. Do not move to the next mistake unless the learner clearly shows understanding. "
-            "If attempts are low, stay Socratic. If attempts are 2 or more, you may be a bit more explicit, but still keep the learner engaged.\n\n"
+            "Use short clues and short coaching, ideally 1 to 3 sentences. Do not move to the next mistake unless the learner clearly shows understanding. "
+            "If attempts are low, stay Socratic. If attempts are 2 or more, be a bit more explicit, but still keep the learner engaged. "
+            "Match the tone to the learner profile: direct means concise and efficient, supportive means calm and encouraging, gentle means extra patience and lower cognitive load.\n\n"
+            f"Learner profile: {json.dumps(ability_profile, ensure_ascii=True)}\n"
             f"Current wrong-step item: {json.dumps(item, ensure_ascii=True)}\n"
+            f"Recent tutoring history: {json.dumps(recent_history, ensure_ascii=True)}\n"
             f"Student reply: {message}\n\n"
             "Return valid JSON only with keys "
             "\"understanding_status\", \"should_advance\", and \"assistant_message\". "
@@ -247,6 +304,7 @@ class ReportTutoringService:
         session["history"].append(
             {
                 "item_id": item["id"],
+                "question_number": item.get("question_number"),
                 "user": message,
                 "assistant": assistant_message,
                 "understanding_status": understanding_status,
@@ -255,21 +313,39 @@ class ReportTutoringService:
         )
 
         if should_advance:
+            current_question = item.get("question_number")
             session["current_index"] += 1
             session["ready_for_next"] = True
             if session["current_index"] < len(items):
                 next_item = items[session["current_index"]]
-                assistant_message = (
-                    f"{assistant_message}\n\nGood. Let's move to the next one.\n{self._compose_question(next_item)}"
-                )
+                if current_question != next_item.get("question_number"):
+                    session["completed_questions"].add(current_question)
+                    assistant_message = (
+                        f"{assistant_message}\n\nMoving to Question {next_item.get('question_number')}. "
+                        f"Here is the next step to fix.\n{self._compose_question(next_item)}"
+                    )
+                else:
+                    assistant_message = (
+                        f"{assistant_message}\n\nGood. Stay on Question {current_question}. "
+                        f"Now fix the next step.\n{self._compose_question(next_item)}"
+                    )
             else:
+                session["completed_questions"].add(current_question)
                 assistant_message = (
-                    f"{assistant_message}\n\nYou worked through every wrong-step target in this report. "
-                    "You can now revisit the report and check whether your new explanations match the corrections."
+                    f"{assistant_message}\n\nYou worked through every wrong-step target across all questions. "
+                    "This tutoring session is now complete."
                 )
         else:
             session["ready_for_next"] = False
 
+        logger.info(
+            "Tutoring turn resolved | session=%s understanding=%s advance=%s next_index=%d completed_questions=%d",
+            tutoring_session_id,
+            understanding_status,
+            should_advance,
+            session["current_index"],
+            len(session["completed_questions"]),
+        )
         progress = self._progress(session)
         return TutoringChatResponse(
             tutoring_session_id=tutoring_session_id,

@@ -271,6 +271,36 @@ def resolve_phase(chunk: CognitiveChunk) -> SessionPhase:
     return INTENT_TO_PHASE.get(chunk.intent_refined, SessionPhase.UNKNOWN)
 
 
+def resolve_phase_with_context(chunk: CognitiveChunk, state: SessionState) -> SessionPhase:
+    candidate = resolve_phase(chunk)
+    previous = state.phase
+    transcript = (chunk.transcript or "").strip()
+    token_count = len(transcript.split())
+    low_signal = token_count <= 2 or chunk.semantic_signals.filler_only
+
+    if previous == SessionPhase.UNKNOWN:
+        return candidate
+    if low_signal and candidate in {SessionPhase.UNKNOWN, previous}:
+        return previous
+    if previous == SessionPhase.UNDERSTANDING and candidate == SessionPhase.STRATEGY:
+        if chunk.keyword_strength >= 0.22 or chunk.intent_refined in {CognitiveIntent.STRATEGY_SELECTION, CognitiveIntent.COMPARISON_ANALYSIS}:
+            return candidate
+        return previous
+    if previous == SessionPhase.STRATEGY and candidate == SessionPhase.UNDERSTANDING:
+        if chunk.intent_refined in {CognitiveIntent.PROBLEM_UNDERSTANDING, CognitiveIntent.PARAMETER_RECOGNITION} and chunk.confidence >= 0.82 and token_count >= 5:
+            return candidate
+        return previous
+    if previous in {SessionPhase.UNDERSTANDING, SessionPhase.STRATEGY} and candidate == SessionPhase.EXECUTION:
+        if chunk.trajectory == CognitiveTrajectory.EXECUTION_COMMITMENT or chunk.intent_refined in {CognitiveIntent.EXECUTION_START, CognitiveIntent.SOLUTION_SUMMARY, CognitiveIntent.VERIFICATION}:
+            return candidate
+        return previous
+    if previous == SessionPhase.EXECUTION and candidate in {SessionPhase.UNDERSTANDING, SessionPhase.STRATEGY}:
+        return previous if low_signal or chunk.confidence < 0.86 else candidate
+    if candidate == SessionPhase.UNKNOWN:
+        return previous
+    return candidate
+
+
 def should_transition_to_solving(chunk: CognitiveChunk, current_lifecycle: SessionLifecycle) -> bool:
     if current_lifecycle in {SessionLifecycle.COMPLETED, SessionLifecycle.CLOSED}:
         return False
@@ -286,24 +316,34 @@ def should_transition_to_solving(chunk: CognitiveChunk, current_lifecycle: Sessi
 
 
 def build_timeline_metrics(state: SessionState) -> TimelineMetrics:
+    spans = build_phase_spans(state)
     understanding = 0.0
     strategy = 0.0
     deviation = 0.0
     execution = 0.0
     verification = 0.0
 
-    for chunk in state.chunks:
-        duration = chunk.timestamp.end_time - chunk.timestamp.start_time
-        if chunk.intent_refined in {CognitiveIntent.PROBLEM_UNDERSTANDING, CognitiveIntent.PARAMETER_RECOGNITION, CognitiveIntent.CONCEPTUAL_EXPLANATION, CognitiveIntent.WORKING_MEMORY_RETRIEVAL}:
+    for span in spans:
+        duration = span["duration_seconds"]
+        phase = span["phase"]
+        intents = span["intents"]
+        if phase == SessionPhase.UNDERSTANDING:
             understanding += duration
-        elif chunk.intent_refined in {CognitiveIntent.STRATEGY_SELECTION, CognitiveIntent.COMPARISON_ANALYSIS}:
+        elif phase == SessionPhase.STRATEGY:
             strategy += duration
-        elif chunk.deviation_flag or chunk.intent_refined in {CognitiveIntent.DEVIATION, CognitiveIntent.STUCK_STATE}:
+        elif phase == SessionPhase.EXECUTION:
+            if CognitiveIntent.VERIFICATION in intents:
+                verification += duration * 0.35
+                execution += duration * 0.65
+            else:
+                execution += duration
+        elif phase == SessionPhase.REFLECTION:
+            if CognitiveIntent.VERIFICATION in intents:
+                verification += duration
+            else:
+                deviation += duration * 0.35
+        if span["has_deviation"]:
             deviation += duration
-        elif chunk.intent_refined in {CognitiveIntent.EXECUTION_START, CognitiveIntent.SOLUTION_SUMMARY, CognitiveIntent.ERROR_CORRECTION, CognitiveIntent.CONFIDENCE_EXPRESSION}:
-            execution += duration
-        elif chunk.intent_refined == CognitiveIntent.VERIFICATION:
-            verification += duration
 
     denominator = understanding + strategy + deviation + execution + verification
     efficiency = 0.0 if denominator == 0 else max(0.0, 100.0 - ((deviation + strategy) / denominator) * 100.0)
@@ -315,4 +355,61 @@ def build_timeline_metrics(state: SessionState) -> TimelineMetrics:
         verification_time_seconds=round(verification, 2),
         decision_efficiency_score=round(efficiency, 2),
     )
+
+
+def build_phase_spans(state: SessionState) -> list[dict[str, object]]:
+    if not state.chunks:
+        return []
+
+    spans: list[dict[str, object]] = []
+    current_span: dict[str, object] | None = None
+
+    for chunk in state.chunks:
+        phase = resolve_phase_with_context(chunk, state)
+        start = chunk.timestamp.start_time
+        end = chunk.timestamp.end_time
+        chunk_duration = max(end - start, 0.0)
+        micro_chunk = len((chunk.transcript or "").split()) <= 2 or chunk.semantic_signals.filler_only
+
+        if current_span is None:
+            current_span = {
+                "phase": phase,
+                "start_time": start,
+                "end_time": end,
+                "duration_seconds": chunk_duration,
+                "intents": {chunk.intent_refined},
+                "chunk_ids": [chunk.chunk_id],
+                "has_deviation": bool(chunk.deviation_flag),
+                "micro_chunks": 1 if micro_chunk else 0,
+            }
+            continue
+
+        same_phase = current_span["phase"] == phase
+        close_in_time = start - float(current_span["end_time"]) <= 1.4
+        should_absorb_micro = micro_chunk and close_in_time
+
+        if same_phase or should_absorb_micro:
+            current_span["end_time"] = end
+            current_span["duration_seconds"] = round(float(current_span["end_time"]) - float(current_span["start_time"]), 3)
+            current_span["intents"].add(chunk.intent_refined)
+            current_span["chunk_ids"].append(chunk.chunk_id)
+            current_span["has_deviation"] = bool(current_span["has_deviation"] or chunk.deviation_flag)
+            current_span["micro_chunks"] = int(current_span["micro_chunks"]) + (1 if micro_chunk else 0)
+        else:
+            spans.append(current_span)
+            current_span = {
+                "phase": phase,
+                "start_time": start,
+                "end_time": end,
+                "duration_seconds": chunk_duration,
+                "intents": {chunk.intent_refined},
+                "chunk_ids": [chunk.chunk_id],
+                "has_deviation": bool(chunk.deviation_flag),
+                "micro_chunks": 1 if micro_chunk else 0,
+            }
+
+    if current_span is not None:
+        spans.append(current_span)
+
+    return spans
 

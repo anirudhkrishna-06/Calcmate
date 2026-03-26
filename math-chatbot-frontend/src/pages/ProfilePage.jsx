@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import Navbar from '../components/Navbar';
 import PageTransition from '../components/PageTransition';
-import { getUserProfile, getUserStreak, listUserChats } from '../services/userData';
+import { getUserProfile, getUserStreak, listUserChats, listUserThinkingSessions } from '../services/userData';
 
 export default function ProfilePage() {
     const { user, updateProfile } = useAuth();
@@ -31,6 +31,7 @@ export default function ProfilePage() {
     const [stats, setStats] = useState({
         totalQuestions: 0,
         totalSessions: 0,
+        thinkingSessions: 0,
         currentStreak: 0,
         memberSince: '',
     });
@@ -42,9 +43,10 @@ export default function ProfilePage() {
             if (!user?.id) return;
 
             try {
-                const [profile, sessions, streakData] = await Promise.all([
+                const [profile, sessions, thinkingSessions, streakData] = await Promise.all([
                     getUserProfile(user.id, user),
                     listUserChats(user.id, 100),
+                    listUserThinkingSessions(user.id, 100),
                     getUserStreak(user.id),
                 ]);
 
@@ -62,6 +64,7 @@ export default function ProfilePage() {
                 setStats({
                     totalQuestions: totalMessages,
                     totalSessions: sessions.length,
+                    thinkingSessions: thinkingSessions.length,
                     currentStreak: streakData.currentStreak || 0,
                     memberSince: user?.createdAt
                         ? new Date(user.createdAt).toLocaleDateString([], { month: 'long', year: 'numeric' })
@@ -121,8 +124,8 @@ export default function ProfilePage() {
             icon: MessageSquare,
         },
         {
-            label: 'Chat Sessions',
-            value: stats.totalSessions,
+            label: 'Thinking IDE Sessions',
+            value: stats.thinkingSessions,
             icon: Brain,
         },
         {

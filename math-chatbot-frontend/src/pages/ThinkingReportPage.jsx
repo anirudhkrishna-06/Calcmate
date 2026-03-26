@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { AlertTriangle, ArrowRight, Award, BarChart3, BookOpen, Brain, CheckCircle2, Clock, Lightbulb, Loader2, MessageSquare, Search, Send, Target, Zap } from 'lucide-react';
 import Navbar from '../components/Navbar';
 import PageTransition from '../components/PageTransition';
 import { COGNITIVE_API_BASE as API_BASE_URL } from '../config/api';
+import { useAuth } from '../context/AuthContext';
+import { recordCompletedThinkingSession } from '../services/userData';
 
 function formatTime(seconds) {
     const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
@@ -45,6 +47,7 @@ function WrongStepCard({ item, accentClass }) {
 
 export default function ThinkingReportPage() {
     const navigate = useNavigate();
+    const { user } = useAuth();
     const [report, setReport] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -55,6 +58,7 @@ export default function ThinkingReportPage() {
     const [tutorProgress, setTutorProgress] = useState(null);
     const [tutoringAvailable, setTutoringAvailable] = useState(false);
     const [tutoringIntro, setTutoringIntro] = useState('');
+    const completionPersistedRef = useRef(false);
 
     const applyTutoringBootstrap = (data) => {
         setTutoringSessionId(data?.tutoring_session_id || '');
@@ -84,6 +88,44 @@ export default function ThinkingReportPage() {
     const aggregateReportRaw = localStorage.getItem('mathmend_session_report');
     const sessionId = localStorage.getItem('mathmend_session_id');
     const timeElapsed = parseInt(localStorage.getItem('mathmend_session_time') || localStorage.getItem('thinking_session_time') || '120', 10);
+
+    const persistCompletedThinkingSession = async (sourceReport) => {
+        if (!user?.id || !sourceReport || completionPersistedRef.current) return;
+
+        const rounds = Array.isArray(sourceReport.rounds) ? sourceReport.rounds : [];
+        const roundSessionIds = rounds.map((round) => round?.sessionId).filter(Boolean);
+        const aggregateSessionId = roundSessionIds.length > 0 ? `thinking_${roundSessionIds.join('_')}` : `thinking_${sessionId || Date.now()}`;
+        const storageKey = `mathmend_thinking_completed_${aggregateSessionId}`;
+        if (localStorage.getItem(storageKey) === '1') {
+            completionPersistedRef.current = true;
+            return;
+        }
+
+        const payload = {
+            id: aggregateSessionId,
+            aggregateSessionId,
+            sessionId: aggregateSessionId,
+            roundSessionIds,
+            completedAt: new Date().toISOString(),
+            tutoringCompleted: true,
+            tutoringCompletedAt: new Date().toISOString(),
+            topic: sourceReport.topic || rounds[0]?.topic || 'General Math',
+            totalQuestions: sourceReport.total_questions || rounds.length || 0,
+            correctAnswers: sourceReport.correct_answers || 0,
+            totalSessionTime: sourceReport.total_session_time || timeElapsed || 0,
+            totalChunks: sourceReport.total_chunks || 0,
+            totalInterventions: sourceReport.total_interventions || 0,
+            pathAlignmentScore: sourceReport.validation_state?.path_alignment_score || 0,
+            confusionProbability: sourceReport.predictive_analytics?.confusion_probability || 0,
+            thinkingGraph: sourceReport.thinking_graph || '',
+            weakTopic: sourceReport.wrong_step_analysis?.next_focus?.[0] || sourceReport.predictive_analytics?.highlights?.[0] || '',
+            reportGeneratedAt: sourceReport.generated_at || new Date().toISOString(),
+        };
+
+        await recordCompletedThinkingSession(user.id, payload);
+        localStorage.setItem(storageKey, '1');
+        completionPersistedRef.current = true;
+    };
 
     useEffect(() => {
         if (aggregateReportRaw) {
@@ -142,6 +184,20 @@ export default function ThinkingReportPage() {
         startTutoring();
         return () => { cancelled = true; };
     }, [report, tutoringSessionId, tutorStatus]);
+
+    useEffect(() => {
+        if (!report || !user?.id || completionPersistedRef.current) return;
+
+        const shouldPersist = Boolean(
+            tutorProgress?.completed ||
+            (tutorStatus === 'ready' && tutoringAvailable === false)
+        );
+        if (!shouldPersist) return;
+
+        persistCompletedThinkingSession(report).catch((error) => {
+            console.error('Thinking session completion sync error:', error);
+        });
+    }, [report, tutorProgress?.completed, tutorStatus, tutoringAvailable, user?.id]);
 
     async function handleTutorSubmit(event) {
         event.preventDefault();

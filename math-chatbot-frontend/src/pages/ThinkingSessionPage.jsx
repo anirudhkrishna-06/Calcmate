@@ -937,6 +937,7 @@ export default function ThinkingSessionPage() {
             questionNumber,
             sessionId: currentSessionId,
             problemText,
+            topic: selectedTopic,
             thinkingSeconds: thinkingTimerRef.current,
             solvingSeconds: Math.max(solvingTimerRef.current - uploadGraceUsed, 0),
             uploadGraceUsed,
@@ -998,6 +999,7 @@ export default function ThinkingSessionPage() {
                 questionNumber,
                 sessionId: round?.sessionId || currentSessionId,
                 problemText,
+                topic: selectedTopic,
                 thinkingSeconds: thinkingTimerRef.current,
                 solvingSeconds: Math.max(solvingTimerRef.current - graceUsed, 0),
                 uploadGraceUsed: graceUsed,
@@ -1067,6 +1069,7 @@ export default function ThinkingSessionPage() {
                 report: reports[index] || null,
             }));
             const aggregateReport = buildAggregateReport(roundsWithReports, reports);
+            aggregateReport.topic = selectedTopic;
             localStorage.setItem('mathmend_session_report', JSON.stringify(aggregateReport));
             localStorage.setItem('mathmend_session_id', rounds[0].sessionId);
             localStorage.setItem('mathmend_session_time', String(aggregateReport.total_session_time || 0));

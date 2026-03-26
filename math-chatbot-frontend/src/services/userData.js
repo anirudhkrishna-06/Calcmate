@@ -27,6 +27,7 @@ const DEFAULT_STREAK = {
     totalSolved: 0,
     totalActivities: 0,
     chatActivities: 0,
+    thinkingActivities: 0,
     quizActivities: 0,
     contestActivities: 0,
     currentStreak: 0,
@@ -43,6 +44,9 @@ const DEFAULT_ANALYTICS = {
     totalQuestions: 0,
     activeDays: 0,
     totalSessions: 0,
+    thinkingSessionsCompleted: 0,
+    totalThinkingTimeSeconds: 0,
+    averageThinkingSessionSeconds: 0,
     quizzesAttended: 0,
     cumulativeQuizScore: 0,
     averageQuizScore: 0,
@@ -67,6 +71,8 @@ const streakDocRef = (userId) => doc(db, 'users', userId, 'streak', 'summary');
 const analyticsDocRef = (userId) => doc(db, 'users', userId, 'analytics', 'summary');
 const quizAttemptsCollectionRef = (userId) => collection(db, 'users', userId, 'quizAttempts');
 const ratingDocRef = (userId) => doc(db, 'users', userId, 'rating', 'summary');
+const thinkingSessionsCollectionRef = (userId) => collection(db, 'users', userId, 'thinkingSessions');
+const thinkingSessionDocRef = (userId, sessionId) => doc(db, 'users', userId, 'thinkingSessions', sessionId);
 
 const normalizeIsoDate = (value) => {
     if (!value) return null;
@@ -85,6 +91,49 @@ const normalizeIsoDate = (value) => {
 
     return null;
 };
+
+function buildThinkingSessionId(session = {}) {
+    const explicitId = session.sessionId || session.id || session.aggregateSessionId;
+    if (explicitId) return String(explicitId);
+
+    const roundIds = Array.isArray(session.roundSessionIds) ? session.roundSessionIds.filter(Boolean) : [];
+    if (roundIds.length > 0) {
+        return `thinking_${roundIds.join('_')}`;
+    }
+
+    return `thinking_${createClientId()}`;
+}
+
+function normalizeThinkingSession(session = {}) {
+    const completedAt = normalizeIsoDate(session.completedAt) || new Date().toISOString();
+    const totalQuestions = Number.isFinite(session.totalQuestions) ? session.totalQuestions : 0;
+    const correctAnswers = Number.isFinite(session.correctAnswers) ? session.correctAnswers : 0;
+    const totalSessionTime = Number.isFinite(session.totalSessionTime) ? session.totalSessionTime : 0;
+    const totalChunks = Number.isFinite(session.totalChunks) ? session.totalChunks : 0;
+    const totalInterventions = Number.isFinite(session.totalInterventions) ? session.totalInterventions : 0;
+    const pathAlignmentScore = Number.isFinite(session.pathAlignmentScore) ? session.pathAlignmentScore : 0;
+    const confusionProbability = Number.isFinite(session.confusionProbability) ? session.confusionProbability : 0;
+
+    return {
+        id: buildThinkingSessionId(session),
+        aggregateSessionId: session.aggregateSessionId || session.sessionId || null,
+        roundSessionIds: Array.isArray(session.roundSessionIds) ? session.roundSessionIds.filter(Boolean) : [],
+        completedAt,
+        topic: session.topic || 'General Math',
+        totalQuestions,
+        correctAnswers,
+        totalSessionTime,
+        totalChunks,
+        totalInterventions,
+        tutoringCompleted: Boolean(session.tutoringCompleted),
+        tutoringCompletedAt: normalizeIsoDate(session.tutoringCompletedAt) || completedAt,
+        pathAlignmentScore,
+        confusionProbability,
+        thinkingGraph: session.thinkingGraph || '',
+        weakTopic: session.weakTopic || '',
+        reportGeneratedAt: normalizeIsoDate(session.reportGeneratedAt) || completedAt,
+    };
+}
 
 export const inferTopicTag = (text = '') => classifyMathTopic(text).topicTag;
 
@@ -337,9 +386,10 @@ function computeStreakSummaryFromDays(activeDays = []) {
     };
 }
 
-function buildStreakFromActivitySources({ chats = [], quizAttempts = [], contestHistory = [] }) {
+function buildStreakFromActivitySources({ chats = [], thinkingSessions = [], quizAttempts = [], contestHistory = [] }) {
     const activeDaySet = new Set();
     let chatActivities = 0;
+    let thinkingActivities = 0;
     let quizActivities = 0;
     let contestActivities = 0;
     let lastActivityAt = null;
@@ -379,14 +429,25 @@ function buildStreakFromActivitySources({ chats = [], quizAttempts = [], contest
         }
     });
 
+    thinkingSessions.forEach((session) => {
+        const timestamp = normalizeIsoDate(session.tutoringCompletedAt || session.completedAt);
+        const dateKey = normalizeActivityDateKey(timestamp);
+        thinkingActivities += 1;
+        if (dateKey) activeDaySet.add(dateKey);
+        if (timestamp && (!lastActivityAt || new Date(timestamp) > new Date(lastActivityAt))) {
+            lastActivityAt = timestamp;
+        }
+    });
+
     const streakSummary = computeStreakSummaryFromDays(Array.from(activeDaySet));
-    const totalActivities = chatActivities + quizActivities + contestActivities;
+    const totalActivities = chatActivities + thinkingActivities + quizActivities + contestActivities;
 
     return {
         ...streakSummary,
         totalSolved: totalActivities,
         totalActivities,
         chatActivities,
+        thinkingActivities,
         quizActivities,
         contestActivities,
         lastActivityAt,
@@ -415,7 +476,7 @@ const computeActivityLevel = ({ totalQuestions, activeDays, totalSessions, weakT
     return 'New';
 };
 
-export function computeAnalyticsFromChats(chats = []) {
+export function computeAnalyticsFromChats(chats = [], thinkingSessions = []) {
     const topicMap = new Map(
         TOPIC_CATALOG.map((topic) => [
             topic.label,
@@ -525,7 +586,13 @@ export function computeAnalyticsFromChats(chats = []) {
         }));
 
     const activeDays = activeDaySet.size;
-    const totalSessions = chats.filter((chat) => (chat.messages || []).length > 0).length;
+    const chatSessions = chats.filter((chat) => (chat.messages || []).length > 0).length;
+    const thinkingSessionsCompleted = thinkingSessions.length;
+    const totalThinkingTimeSeconds = thinkingSessions.reduce(
+        (sum, session) => sum + (Number.isFinite(session.totalSessionTime) ? session.totalSessionTime : 0),
+        0
+    );
+    const totalSessions = chatSessions + thinkingSessionsCompleted;
     const activityLevel = computeActivityLevel({
         totalQuestions,
         activeDays,
@@ -548,6 +615,9 @@ export function computeAnalyticsFromChats(chats = []) {
         totalQuestions,
         activeDays,
         totalSessions,
+        thinkingSessionsCompleted,
+        totalThinkingTimeSeconds,
+        averageThinkingSessionSeconds: thinkingSessionsCompleted > 0 ? Number((totalThinkingTimeSeconds / thinkingSessionsCompleted).toFixed(1)) : 0,
         updatedAt: new Date().toISOString(),
     };
 }
@@ -566,6 +636,7 @@ export async function getUserStreak(userId) {
         totalSolved: Number.isFinite(data.totalSolved) ? data.totalSolved : 0,
         totalActivities: Number.isFinite(data.totalActivities) ? data.totalActivities : Number.isFinite(data.totalSolved) ? data.totalSolved : 0,
         chatActivities: Number.isFinite(data.chatActivities) ? data.chatActivities : Number.isFinite(data.totalSolved) ? data.totalSolved : 0,
+        thinkingActivities: Number.isFinite(data.thinkingActivities) ? data.thinkingActivities : 0,
         quizActivities: Number.isFinite(data.quizActivities) ? data.quizActivities : 0,
         contestActivities: Number.isFinite(data.contestActivities) ? data.contestActivities : 0,
         currentStreak: Number.isFinite(data.currentStreak) ? data.currentStreak : 0,
@@ -592,6 +663,9 @@ export async function getUserAnalytics(userId) {
         totalQuestions: Number.isFinite(data.totalQuestions) ? data.totalQuestions : 0,
         activeDays: Number.isFinite(data.activeDays) ? data.activeDays : 0,
         totalSessions: Number.isFinite(data.totalSessions) ? data.totalSessions : 0,
+        thinkingSessionsCompleted: Number.isFinite(data.thinkingSessionsCompleted) ? data.thinkingSessionsCompleted : 0,
+        totalThinkingTimeSeconds: Number.isFinite(data.totalThinkingTimeSeconds) ? data.totalThinkingTimeSeconds : 0,
+        averageThinkingSessionSeconds: Number.isFinite(data.averageThinkingSessionSeconds) ? data.averageThinkingSessionSeconds : 0,
         quizzesAttended: Number.isFinite(data.quizzesAttended) ? data.quizzesAttended : 0,
         cumulativeQuizScore: Number.isFinite(data.cumulativeQuizScore) ? data.cumulativeQuizScore : 0,
         averageQuizScore: Number.isFinite(data.averageQuizScore) ? data.averageQuizScore : 0,
@@ -610,6 +684,7 @@ export async function saveUserStreak(userId, streak = {}) {
         totalSolved: Number.isFinite(streak.totalSolved) ? streak.totalSolved : 0,
         totalActivities: Number.isFinite(streak.totalActivities) ? streak.totalActivities : Number.isFinite(streak.totalSolved) ? streak.totalSolved : 0,
         chatActivities: Number.isFinite(streak.chatActivities) ? streak.chatActivities : 0,
+        thinkingActivities: Number.isFinite(streak.thinkingActivities) ? streak.thinkingActivities : 0,
         quizActivities: Number.isFinite(streak.quizActivities) ? streak.quizActivities : 0,
         contestActivities: Number.isFinite(streak.contestActivities) ? streak.contestActivities : 0,
         currentStreak: Number.isFinite(streak.currentStreak) ? streak.currentStreak : 0,
@@ -633,6 +708,9 @@ export async function saveUserAnalytics(userId, analytics = {}) {
         totalQuestions: Number.isFinite(analytics.totalQuestions) ? analytics.totalQuestions : 0,
         activeDays: Number.isFinite(analytics.activeDays) ? analytics.activeDays : 0,
         totalSessions: Number.isFinite(analytics.totalSessions) ? analytics.totalSessions : 0,
+        thinkingSessionsCompleted: Number.isFinite(analytics.thinkingSessionsCompleted) ? analytics.thinkingSessionsCompleted : 0,
+        totalThinkingTimeSeconds: Number.isFinite(analytics.totalThinkingTimeSeconds) ? analytics.totalThinkingTimeSeconds : 0,
+        averageThinkingSessionSeconds: Number.isFinite(analytics.averageThinkingSessionSeconds) ? analytics.averageThinkingSessionSeconds : 0,
         quizzesAttended: Number.isFinite(analytics.quizzesAttended) ? analytics.quizzesAttended : 0,
         cumulativeQuizScore: Number.isFinite(analytics.cumulativeQuizScore) ? analytics.cumulativeQuizScore : 0,
         averageQuizScore: Number.isFinite(analytics.averageQuizScore) ? analytics.averageQuizScore : 0,
@@ -649,9 +727,10 @@ export async function saveUserAnalytics(userId, analytics = {}) {
 export async function syncUserStreakFromChats(userId, chats = []) {
     if (!userId) return DEFAULT_STREAK;
 
-    const [quizAttemptsSnap, ratingSnap] = await Promise.all([
+    const [quizAttemptsSnap, ratingSnap, thinkingSessionsSnap] = await Promise.all([
         getDocs(query(quizAttemptsCollectionRef(userId), orderBy('completedAt', 'desc'), limit(100))),
         getDoc(ratingDocRef(userId)),
+        getDocs(query(thinkingSessionsCollectionRef(userId), orderBy('completedAt', 'desc'), limit(100))),
     ]);
 
     const quizAttempts = quizAttemptsSnap.docs.map((attemptDoc) => ({
@@ -665,16 +744,59 @@ export async function syncUserStreakFromChats(userId, chats = []) {
             completedAt: normalizeIsoDate(entry.completedAt),
         }))
         : [];
+    const thinkingSessions = thinkingSessionsSnap.docs.map((sessionDoc) => ({
+        id: sessionDoc.id,
+        ...sessionDoc.data(),
+        completedAt: normalizeIsoDate(sessionDoc.data().completedAt),
+        tutoringCompletedAt: normalizeIsoDate(sessionDoc.data().tutoringCompletedAt),
+    }));
 
-    const streak = buildStreakFromActivitySources({ chats, quizAttempts, contestHistory });
+    const streak = buildStreakFromActivitySources({ chats, thinkingSessions, quizAttempts, contestHistory });
     await saveUserStreak(userId, streak);
     return streak;
 }
 
 export async function syncUserAnalyticsFromChats(userId, chats = []) {
-    const analytics = computeAnalyticsFromChats(chats);
+    const thinkingSessionsSnap = await getDocs(query(thinkingSessionsCollectionRef(userId), orderBy('completedAt', 'desc'), limit(100)));
+    const thinkingSessions = thinkingSessionsSnap.docs.map((sessionDoc) => ({
+        id: sessionDoc.id,
+        ...sessionDoc.data(),
+        completedAt: normalizeIsoDate(sessionDoc.data().completedAt),
+        tutoringCompletedAt: normalizeIsoDate(sessionDoc.data().tutoringCompletedAt),
+    }));
+    const analytics = computeAnalyticsFromChats(chats, thinkingSessions);
     await saveUserAnalytics(userId, analytics);
     return analytics;
+}
+
+export async function listUserThinkingSessions(userId, maxCount = 25) {
+    if (!userId) return [];
+
+    const snapshot = await getDocs(
+        query(thinkingSessionsCollectionRef(userId), orderBy('completedAt', 'desc'), limit(maxCount))
+    );
+
+    return snapshot.docs.map((sessionDoc) => ({
+        id: sessionDoc.id,
+        ...sessionDoc.data(),
+        completedAt: normalizeIsoDate(sessionDoc.data().completedAt),
+        tutoringCompletedAt: normalizeIsoDate(sessionDoc.data().tutoringCompletedAt),
+    }));
+}
+
+export async function recordCompletedThinkingSession(userId, session = {}) {
+    if (!userId) return null;
+
+    const normalizedSession = normalizeThinkingSession(session);
+    await setDoc(thinkingSessionDocRef(userId, normalizedSession.id), normalizedSession, { merge: true });
+
+    const chats = await listUserChats(userId, 100);
+    await Promise.all([
+        syncUserStreakFromChats(userId, chats),
+        syncUserAnalyticsFromChats(userId, chats),
+    ]);
+
+    return normalizedSession;
 }
 
 export function sortUserChats(chats = []) {

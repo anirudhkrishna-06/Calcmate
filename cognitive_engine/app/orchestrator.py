@@ -41,8 +41,9 @@ from .contracts import (
     WebSocketEnvelope,
 )
 from .session_store import store
-from .state import build_timeline_metrics, default_problem_payload, make_session_state, resolve_phase, topic_problem_payload
+from .state import build_phase_spans, build_timeline_metrics, default_problem_payload, make_session_state, resolve_phase_with_context, topic_problem_payload
 from .predictive_analytics import predictive_analytics_service
+from .llm_budget import llm_budget_controller
 from .strategy_validation.solution_graph import build_enriched_solution_graph
 from .strategy_validation.gemini_enhancer import gemini_graph_enhancer
 from .strategy_validation.validation_logger import validation_logger
@@ -61,6 +62,7 @@ class SessionOrchestrator:
         problem_payload = payload.problem_payload or topic_problem_payload(requested_topic) or default_problem_payload()
         state = make_session_state(session_id, problem_payload)
         store.create(state)
+        llm_budget_controller.reset(session_id)
         event = EngineEvent(event_type=EngineEventType.SESSION_STARTED, session_id=session_id, payload={"problem_payload": problem_payload.model_dump(mode="json")})
 
         async with store.get_lock(session_id):
@@ -213,7 +215,17 @@ class SessionOrchestrator:
         if state is None:
             raise KeyError("Session not found.")
         if state.cached_report:
+            import logging
+            logging.getLogger("cognitive_engine.orchestrator").info("Generate report cache hit | session=%s", session_id)
             return state.cached_report
+        import logging
+        logging.getLogger("cognitive_engine.orchestrator").info(
+            "Generate report started | session=%s chunks=%d interventions=%d answer_available=%s",
+            session_id,
+            len(state.chunks),
+            state.intervention_count,
+            bool(state.answer_result),
+        )
         metrics = build_timeline_metrics(state)
         vs = state.validation_state
         path = state.cognitive_path
@@ -258,6 +270,12 @@ class SessionOrchestrator:
         }
         state.cached_report = report
         store.save(state)
+        logging.getLogger("cognitive_engine.orchestrator").info(
+            "Generate report completed | session=%s wrong_step_available=%s predictive_available=%s",
+            session_id,
+            bool((report.get("wrong_step_analysis") or {}).get("available")) if isinstance(report.get("wrong_step_analysis"), dict) else False,
+            bool((report.get("predictive_analytics") or {}).get("available")) if isinstance(report.get("predictive_analytics"), dict) else False,
+        )
         return report
 
     async def send_snapshot(self, session_id: str) -> None:
@@ -290,7 +308,7 @@ class SessionOrchestrator:
         elif event.event_type == EngineEventType.INTENT_CLASSIFIED:
             chunk = CognitiveChunk.model_validate(event.payload["chunk"])
             state.chunks.append(chunk)
-            state.phase = resolve_phase(chunk)
+            state.phase = resolve_phase_with_context(chunk, state)
         elif event.event_type == EngineEventType.TIMELINE_UPDATED:
             state.timeline.append(TimelineEvent(event_type=event.event_type.value, at_seconds=float(event.payload.get("at_seconds", 0.0)), category=event.payload.get("category", "signal"), message=event.payload.get("message", "Timeline updated"), payload=event.payload))
         elif event.event_type == EngineEventType.DEVIATION_DETECTED:

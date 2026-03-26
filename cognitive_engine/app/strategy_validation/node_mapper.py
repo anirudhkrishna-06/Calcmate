@@ -74,6 +74,13 @@ class NodeMapper:
 
         # Minimum threshold to consider a match valid
         if best_node is None or best_score < 0.15:
+            if (
+                chunk.exploration_valid
+                or intent in {CognitiveIntent.STRATEGY_SELECTION, CognitiveIntent.COMPARISON_ANALYSIS, CognitiveIntent.META_COGNITION}
+            ):
+                fallback = self._strategy_fallback_node(chunk, solution_graph)
+                if fallback is not None:
+                    return fallback
             return self._off_graph_node(chunk, reason="no_match")
 
         logger.debug(
@@ -166,4 +173,24 @@ class NodeMapper:
             intent=chunk.intent_refined,
             is_on_graph=False,
             node_type="off_graph",
+        )
+
+    def _strategy_fallback_node(
+        self,
+        chunk: CognitiveChunk,
+        solution_graph: SolutionGraph,
+    ) -> CognitivePathNode | None:
+        method_nodes = [node for node in solution_graph.nodes if node.node_type == "method"]
+        if not method_nodes:
+            return None
+        target = next((node for node in method_nodes if node.priority == "critical"), method_nodes[0])
+        return CognitivePathNode(
+            node_label=f"{target.label} (exploration)",
+            mapped_graph_node_id=target.node_id,
+            source_chunk_id=chunk.chunk_id,
+            timestamp=chunk.timestamp.end_time,
+            confidence_weight=round(max(chunk.confidence * 0.45, 0.18), 3),
+            intent=chunk.intent_refined,
+            is_on_graph=True,
+            node_type=target.node_type,
         )

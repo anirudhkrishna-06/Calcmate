@@ -15,6 +15,7 @@ import {
     createClientId,
     getUserAnalytics,
     getUserStreak,
+    listUserThinkingSessions,
     listUserChats,
     saveUserAnalytics,
     syncUserStreakFromChats,
@@ -98,10 +99,11 @@ export async function listTeacherStudents(teacherId) {
         snapshot.docs.map(async (studentDoc) => {
             const base = studentDoc.data();
             const studentId = studentDoc.id;
-            const [userSnap, analytics, chats, quizSummary, ratingProfile, streakSummary] = await Promise.all([
+            const [userSnap, analytics, chats, thinkingSessions, quizSummary, ratingProfile, streakSummary] = await Promise.all([
                 getDoc(doc(db, 'users', studentId)),
                 getUserAnalytics(studentId),
                 listUserChats(studentId, 25),
+                listUserThinkingSessions(studentId, 10),
                 getUserQuizSummary(studentId),
                 getUserRatingProfile(studentId),
                 getUserStreak(studentId),
@@ -127,6 +129,12 @@ export async function listTeacherStudents(teacherId) {
                     totalQuestions: chatQuestions,
                     latestChatTitle: latestChat?.title || 'No conversations yet',
                     latestChatAt: latestChat?.updatedAt || null,
+                },
+                thinkingSummary: {
+                    totalSessions: thinkingSessions.length,
+                    latestCompletedAt: thinkingSessions[0]?.completedAt || null,
+                    latestTopic: thinkingSessions[0]?.topic || '',
+                    totalThinkingTimeSeconds: thinkingSessions.reduce((sum, session) => sum + (session.totalSessionTime || 0), 0),
                 },
                 quizSummary,
                 ratingProfile,

@@ -11,12 +11,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from fractions import Fraction
 from pathlib import Path
 
 import httpx
 
 from .config import get_settings
+from .llm_budget import llm_budget_controller
 from .local_llm import call_ollama
 
 logger = logging.getLogger("cognitive_engine.answer_validator")
@@ -46,55 +48,175 @@ def resolve_tesseract_cmd() -> str | None:
     return None
 
 
-def preprocess_for_ocr(image):
+def _safe_excerpt(text: str, limit: int = 160) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    return compact[:limit]
+
+
+def preprocess_for_ocr(image, *, variant: str = "fast"):
     try:
         from PIL import ImageFilter, ImageOps
     except ImportError:
         return image
 
-    processed = image.convert("L")
+    processed = ImageOps.exif_transpose(image)
+    processed = processed.convert("L")
     processed = ImageOps.autocontrast(processed)
+
+    if variant == "fast":
+        processed = processed.filter(ImageFilter.SHARPEN)
+        return processed
+
+    bbox = processed.point(lambda pixel: 0 if pixel > 245 else 255, mode="1").getbbox()
+    if bbox:
+        processed = processed.crop(bbox)
+
+    if min(processed.size) < 120:
+        processed = processed.resize((processed.width * 2, processed.height * 2))
+
+    processed = processed.filter(ImageFilter.MedianFilter(size=3))
     processed = processed.filter(ImageFilter.SHARPEN)
-    processed = processed.point(lambda pixel: 0 if pixel < 160 else 255, mode="1")
+    processed = processed.point(lambda pixel: 0 if pixel < 170 else 255, mode="1")
     return processed
+
+
+def _run_tesseract(*, tesseract_cmd: str, input_path: Path, psm: int, timeout_seconds: float) -> tuple[str, str, float]:
+    started_at = time.perf_counter()
+    result = subprocess.run(
+        [tesseract_cmd, str(input_path), "stdout", "--oem", "3", "--psm", str(psm)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    return result.stdout.strip(), (result.stderr or "").strip(), duration_ms
 
 
 def extract_text_from_image(image_bytes: bytes) -> str:
     try:
-        from PIL import Image
+        from PIL import Image, UnidentifiedImageError
     except ImportError:
         Image = None
+        UnidentifiedImageError = Exception
 
     tesseract_cmd = resolve_tesseract_cmd()
     if not tesseract_cmd:
         logger.error("Tesseract executable was not found. Set TESSERACT_CMD or install Tesseract on PATH.")
         return ""
 
+    if not image_bytes:
+        logger.warning("OCR skipped | reason=empty_image_payload")
+        return ""
+
+    logger.info(
+        "OCR request received | bytes=%d tesseract_cmd=%s",
+        len(image_bytes),
+        tesseract_cmd,
+    )
+
     try:
         with tempfile.TemporaryDirectory(prefix="mathmend_ocr_") as temp_dir:
-            input_path = Path(temp_dir) / "input.png"
-            output_base = Path(temp_dir) / "output"
+            base_dir = Path(temp_dir)
+            image = None
 
             if Image is not None:
                 try:
                     image = Image.open(io.BytesIO(image_bytes))
-                    image = preprocess_for_ocr(image)
-                    image.save(input_path)
-                except Exception:
-                    input_path.write_bytes(image_bytes)
+                    image.load()
+                    logger.info(
+                        "OCR image decoded | format=%s mode=%s size=%sx%s",
+                        image.format or "<unknown>",
+                        image.mode,
+                        image.width,
+                        image.height,
+                    )
+                except UnidentifiedImageError:
+                    logger.warning("OCR image decode failed | reason=unidentified_image")
+                    image = None
+                except Exception as exc:
+                    logger.warning("OCR image decode failed | error=%s", exc)
+                    image = None
             else:
-                input_path.write_bytes(image_bytes)
+                logger.warning("Pillow is unavailable; OCR preprocessing disabled.")
 
-            subprocess.run(
-                [tesseract_cmd, str(input_path), str(output_base), "--oem", "3", "--psm", "6"],
-                check=True,
-                capture_output=True,
-                text=True,
+            attempts: list[tuple[str, int]] = [("fast", 6), ("fast", 11), ("robust", 6)]
+            best_text = ""
+
+            for attempt_index, (variant, psm) in enumerate(attempts, start=1):
+                input_path = base_dir / f"input_{attempt_index}.png"
+                try:
+                    if image is not None:
+                        processed = preprocess_for_ocr(image, variant=variant)
+                        processed.save(input_path)
+                        logger.info(
+                            "OCR attempt prepared | attempt=%d variant=%s psm=%d size=%sx%s mode=%s",
+                            attempt_index,
+                            variant,
+                            psm,
+                            processed.width,
+                            processed.height,
+                            processed.mode,
+                        )
+                    else:
+                        input_path.write_bytes(image_bytes)
+                        logger.info(
+                            "OCR attempt prepared | attempt=%d variant=raw psm=%d bytes=%d",
+                            attempt_index,
+                            psm,
+                            len(image_bytes),
+                        )
+
+                    text, stderr_text, duration_ms = _run_tesseract(
+                        tesseract_cmd=tesseract_cmd,
+                        input_path=input_path,
+                        psm=psm,
+                        timeout_seconds=8.0,
+                    )
+                    logger.info(
+                        "OCR attempt finished | attempt=%d variant=%s psm=%d duration_ms=%.1f length=%d stderr=%s preview=%s",
+                        attempt_index,
+                        variant if image is not None else "raw",
+                        psm,
+                        duration_ms,
+                        len(text),
+                        _safe_excerpt(stderr_text),
+                        _safe_excerpt(text),
+                    )
+
+                    if len(text) > len(best_text):
+                        best_text = text
+                    if text:
+                        logger.info(
+                            "OCR extraction complete | length=%d attempts=%d selected_attempt=%d",
+                            len(text),
+                            attempt_index,
+                            attempt_index,
+                        )
+                        return text
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "OCR attempt timed out | attempt=%d variant=%s psm=%d timeout_seconds=8.0",
+                        attempt_index,
+                        variant if image is not None else "raw",
+                        psm,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    logger.warning(
+                        "OCR attempt failed | attempt=%d variant=%s psm=%d returncode=%s stderr=%s",
+                        attempt_index,
+                        variant if image is not None else "raw",
+                        psm,
+                        exc.returncode,
+                        _safe_excerpt((exc.stderr or "").strip()),
+                    )
+
+            logger.info(
+                "OCR extraction complete | length=%d attempts=%d selected_attempt=best_available",
+                len(best_text),
+                len(attempts),
             )
-            output_text_path = output_base.with_suffix(".txt")
-            text = output_text_path.read_text(encoding="utf-8", errors="ignore").strip() if output_text_path.exists() else ""
-            logger.info("OCR extraction complete | length=%d", len(text))
-            return text
+            return best_text
     except Exception as exc:
         logger.exception("OCR extraction failed | error=%s", exc)
         return ""
@@ -304,51 +426,6 @@ def extract_candidate_answer(ocr_text: str) -> dict:
     }
 
 
-def build_gemini_candidates() -> list[tuple[str, str | None, str, float]]:
-    settings = get_settings()
-    return [
-        ("GEMINI3", settings.gemini3.api_key, settings.gemini3.model, settings.gemini3.timeout_seconds),
-        ("GEMINI2", settings.gemini2.api_key, settings.gemini2.model, settings.gemini2.timeout_seconds),
-    ]
-
-
-async def call_gemini(prompt: str, *, max_output_tokens: int, temperature: float, response_mime_type: str | None = None) -> tuple[str | None, str | None, str | None]:
-    last_error: str | None = None
-    for label, api_key, model, timeout_seconds in build_gemini_candidates():
-        if not api_key:
-            continue
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_output_tokens,
-            },
-        }
-        if response_mime_type:
-            payload["generationConfig"]["responseMimeType"] = response_mime_type
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-            text = "".join(part.get("text", "") for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
-            if text.strip():
-                return text, label, None
-            last_error = f"{label} returned an empty response."
-        except httpx.HTTPStatusError as exc:
-            last_error = f"{label} HTTP {exc.response.status_code}"
-            logger.warning("%s request failed | status=%s", label, exc.response.status_code)
-            if exc.response.status_code not in {429, 500, 502, 503, 504}:
-                break
-        except Exception as exc:
-            last_error = f"{label}: {exc}"
-            logger.exception("%s request failed | error=%s", label, exc)
-
-    return None, None, last_error
-
-
 def parse_json_object(raw_text: str) -> dict | None:
     try:
         return json.loads(raw_text)
@@ -363,22 +440,29 @@ def parse_json_object(raw_text: str) -> dict | None:
     return None
 
 
-async def compute_expected_answer(problem_text: str) -> dict:
+async def compute_expected_answer(problem_text: str, *, session_id: str | None = None) -> dict:
     local_result = solve_problem_locally(problem_text)
     if local_result is not None:
         logger.info("Expected answer computed locally | answer=%s", local_result.get("answer"))
         return local_result
+
+    if session_id and not llm_budget_controller.consume(session_id, reason="answer_validation_expected_answer_ollama"):
+        return build_expected(
+            answer="",
+            explanation="Validation unavailable: session LLM budget exhausted before expected-answer fallback.",
+            provider="budget_guard",
+        )
 
     prompt = (
         "Solve this math problem carefully. Return valid JSON only with keys "
         "\"final_answer\", \"numeric_answer\", and \"solution_summary\".\n\n"
         f"Problem: {problem_text}"
     )
-    answer_text, provider, gemini_error = await call_gemini(
+    answer_text, ollama_error = await call_ollama(
         prompt,
-        max_output_tokens=512,
         temperature=0.1,
-        response_mime_type="application/json",
+        max_tokens=512,
+        system_prompt="You solve school math problems. Return strict JSON only.",
     )
     if answer_text:
         parsed = parse_json_object(answer_text)
@@ -392,16 +476,22 @@ async def compute_expected_answer(problem_text: str) -> dict:
                 answer=str(parsed.get("final_answer", "")).strip(),
                 numeric=numeric_value,
                 explanation=str(parsed.get("solution_summary", "")).strip()[:500],
-                provider=provider or "gemini",
+                provider="ollama",
             )
     return build_expected(
         answer="",
-        explanation=f"Validation unavailable: {gemini_error or 'no solving provider configured'}",
+        explanation=f"Validation unavailable: {ollama_error or 'no solving provider configured'}",
         provider="unavailable",
     )
 
 
 async def judge_answer_with_gemini(problem_text: str, ocr_text: str, expected: dict, candidate: dict) -> dict | None:
+    logger.info(
+        "Answer judgement started | ocr_chars=%d candidate=%s expected=%s",
+        len(ocr_text or ""),
+        candidate.get("text", ""),
+        expected.get("answer", ""),
+    )
     prompt = (
         "You are validating a student's math answer from OCR text. Ignore website chrome, menu labels, and unrelated UI text. "
         "Focus only on the student's final submitted answer if present.\n\n"
@@ -427,6 +517,7 @@ async def judge_answer_with_gemini(problem_text: str, ocr_text: str, expected: d
 
     parsed = parse_json_object(raw_text)
     if not parsed:
+        logger.warning("Answer judgement returned non-JSON | preview=%s", _safe_excerpt(raw_text))
         return None
 
     extracted_answer = str(parsed.get("extracted_student_answer", "")).strip()
@@ -512,9 +603,15 @@ def compare_answers(extracted_text: str, expected: dict, tolerance: float = 0.01
     }
 
 
-async def validate_answer(image_bytes: bytes, problem_text: str, tolerance: float = 0.01) -> dict:
+async def validate_answer(image_bytes: bytes, problem_text: str, tolerance: float = 0.01, session_id: str | None = None) -> dict:
+    logger.info(
+        "Answer validation started | image_bytes=%d problem_length=%d",
+        len(image_bytes),
+        len(problem_text or ""),
+    )
     ocr_text = extract_text_from_image(image_bytes)
     if not ocr_text:
+        logger.warning("Answer validation OCR empty | image_bytes=%d", len(image_bytes))
         return {
             "correct": False,
             "extracted_answer": "",
@@ -523,9 +620,18 @@ async def validate_answer(image_bytes: bytes, problem_text: str, tolerance: floa
             "explanation": "OCR could not run because Tesseract is missing, or no text could be extracted from the image.",
         }
 
-    expected = await compute_expected_answer(problem_text)
+    expected = await compute_expected_answer(problem_text, session_id=session_id)
     candidate = extract_candidate_answer(ocr_text)
-    result = await judge_answer_with_gemini(problem_text, ocr_text, expected, candidate)
+    logger.info(
+        "Answer validation intermediate | expected_answer=%s candidate_answer=%s candidate_lines=%d",
+        expected.get("answer", ""),
+        candidate.get("text", ""),
+        len(candidate.get("candidate_lines", [])),
+    )
+    should_use_ollama_judge = True
+    if session_id:
+        should_use_ollama_judge = llm_budget_controller.consume(session_id, reason="answer_validation_judge_ollama")
+    result = await judge_answer_with_gemini(problem_text, ocr_text, expected, candidate) if should_use_ollama_judge else None
     if result is None:
         result = compare_answers(ocr_text, expected, tolerance)
     explanation = expected.get("explanation", "")

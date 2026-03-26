@@ -37,6 +37,7 @@ class LLMRefinementSettings(BaseModel):
     confidence_threshold: float = 0.6
     ambiguity_threshold: float = 0.55
     window_size: int = 3
+    local_only: bool = True
 
 
 class GeminiSettings(BaseModel):
@@ -69,15 +70,15 @@ class Gemini4Settings(BaseModel):
 
 class GrokSettings(BaseModel):
     api_key: str | None = None
-    model: str = "grok-4.20-reasoning"
+    model: str = "grok-4-1-fast-reasoning"
     base_url: str = "https://api.x.ai/v1/chat/completions"
     timeout_seconds: float = 20.0
 
 
 class OllamaSettings(BaseModel):
     enabled: bool = False
-    base_url: str = "http://localhost:11434/v1"
-    model: str = "qwen3.5:397b-cloud"
+    base_url: str = "http://localhost:11434"
+    model: str = "qwen2.5:7b"
     timeout_seconds: float = 20.0
 
 
@@ -99,6 +100,10 @@ class EngineSettings(BaseModel):
     grok: GrokSettings
     ollama: OllamaSettings
     predictive_analytics: PredictiveAnalyticsSettings
+    llm_budget_max_calls_per_session: int = 4
+    report_min_chunks: int = 4
+    report_min_duration_seconds: float = 20.0
+    report_allow_gemini_fallback: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -130,6 +135,7 @@ def get_settings() -> EngineSettings:
         confidence_threshold=float(os.getenv("LLM_REFINEMENT_CONFIDENCE_THRESHOLD", "0.6")),
         ambiguity_threshold=float(os.getenv("LLM_REFINEMENT_AMBIGUITY_THRESHOLD", "0.55")),
         window_size=int(os.getenv("LLM_REFINEMENT_WINDOW_SIZE", "3")),
+        local_only=os.getenv("LLM_REFINEMENT_LOCAL_ONLY", "true").lower() == "true",
     )
     gemini = GeminiSettings(
         enabled=os.getenv("GEMINI_PARSER_ENABLED", "false").lower() == "true",
@@ -156,14 +162,14 @@ def get_settings() -> EngineSettings:
     )
     grok = GrokSettings(
         api_key=os.getenv("GROK_API_KEY") or os.getenv("GROQ_API_KEY"),
-        model=os.getenv("GROK_MODEL", "grok-4.20-reasoning"),
+        model=os.getenv("GROK_MODEL", "grok-4-1-fast-reasoning"),
         base_url=os.getenv("GROK_BASE_URL", "https://api.x.ai/v1/chat/completions"),
         timeout_seconds=float(os.getenv("GROK_TIMEOUT_SECONDS", "20.0")),
     )
     ollama = OllamaSettings(
         enabled=os.getenv("OLLAMA_ENABLED", "true").lower() == "true",
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-        model=os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud"),
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
         timeout_seconds=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "20.0")),
     )
     predictive_analytics = PredictiveAnalyticsSettings(
@@ -190,4 +196,8 @@ def get_settings() -> EngineSettings:
         grok=grok,
         ollama=ollama,
         predictive_analytics=predictive_analytics,
+        llm_budget_max_calls_per_session=int(os.getenv("LLM_BUDGET_MAX_CALLS_PER_SESSION", "4")),
+        report_min_chunks=int(os.getenv("REPORT_MIN_CHUNKS", "4")),
+        report_min_duration_seconds=float(os.getenv("REPORT_MIN_DURATION_SECONDS", "20")),
+        report_allow_gemini_fallback=os.getenv("REPORT_ALLOW_GEMINI_FALLBACK", "false").lower() == "true",
     )

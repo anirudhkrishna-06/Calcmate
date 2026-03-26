@@ -65,6 +65,7 @@ export default function TeacherDashboardPage() {
     const classroomOverview = useMemo(() => {
         const totalStudents = students.length;
         const totalQuestions = students.reduce((sum, student) => sum + (student.chatSummary?.totalQuestions || 0), 0);
+        const totalThinkingSessions = students.reduce((sum, student) => sum + (student.thinkingSummary?.totalSessions || 0), 0);
         const totalQuizzes = students.reduce((sum, student) => sum + (student.quizSummary?.attended || 0), 0);
         const averageQuizScore =
             totalStudents > 0
@@ -85,6 +86,7 @@ export default function TeacherDashboardPage() {
         return {
             totalStudents,
             totalQuestions,
+            totalThinkingSessions,
             totalQuizzes,
             averageQuizScore: Number(averageQuizScore.toFixed(1)),
             averageRating: Number(averageRating.toFixed(0)),
@@ -136,6 +138,7 @@ export default function TeacherDashboardPage() {
     const overviewCards = [
         { label: 'Linked Students', value: classroomOverview.totalStudents, helper: 'Active teacher-student connections', icon: Users },
         { label: 'Tracked Questions', value: classroomOverview.totalQuestions, helper: 'Questions recorded across the classroom', icon: Brain },
+        { label: 'Thinking IDE', value: classroomOverview.totalThinkingSessions, helper: 'Completed post-tutoring thinking sessions', icon: Activity },
         { label: 'Quiz Attendance', value: classroomOverview.totalQuizzes, helper: 'Completed adaptive quiz attempts', icon: Mail },
         { label: 'Average Quiz Score', value: `${classroomOverview.averageQuizScore}%`, helper: 'Rolling class performance benchmark', icon: BarChart3 },
         { label: 'Class Rating', value: classroomOverview.averageRating, helper: 'Average contest rating across linked students', icon: Sparkles },
@@ -293,7 +296,7 @@ export default function TeacherDashboardPage() {
 
                                     <div className="grid md:grid-cols-3 gap-4 mb-6">
                                         <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Target size={15} className="text-blue-600" />Weak Spots</div><div className="space-y-2">{(selectedStudent.analytics?.weakTopics || []).slice(0, 3).map((topic) => <div key={topic.topic} className="rounded-xl bg-gray-50 px-3 py-2"><p className="text-sm font-medium text-gray-900">{topic.topic}</p><p className="text-xs text-gray-500 mt-1">{topic.count} questions · score {topic.score}</p></div>)}{(selectedStudent.analytics?.weakTopics || []).length === 0 && <p className="text-sm text-gray-500">Not enough data yet.</p>}</div></div>
-                                        <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Brain size={15} className="text-blue-600" />Chat Summary</div><div className="space-y-3 text-sm text-gray-600"><div className="flex items-center justify-between"><span>Total sessions</span><span className="font-semibold text-gray-900">{selectedStudent.chatSummary?.totalSessions || 0}</span></div><div className="flex items-center justify-between"><span>Total questions</span><span className="font-semibold text-gray-900">{selectedStudent.chatSummary?.totalQuestions || 0}</span></div><div><p className="text-xs uppercase tracking-[0.14em] text-gray-400 mb-2">Latest conversation</p><p className="font-medium text-gray-900">{selectedStudent.chatSummary?.latestChatTitle || 'No conversations yet'}</p><p className="text-xs text-gray-500 mt-1">{formatDate(selectedStudent.chatSummary?.latestChatAt)}</p></div></div></div>
+                                        <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Brain size={15} className="text-blue-600" />Thinking + Chat</div><div className="space-y-3 text-sm text-gray-600"><div className="flex items-center justify-between"><span>Chat sessions</span><span className="font-semibold text-gray-900">{selectedStudent.chatSummary?.totalSessions || 0}</span></div><div className="flex items-center justify-between"><span>Thinking IDE sessions</span><span className="font-semibold text-gray-900">{selectedStudent.thinkingSummary?.totalSessions || 0}</span></div><div className="flex items-center justify-between"><span>Total questions</span><span className="font-semibold text-gray-900">{selectedStudent.chatSummary?.totalQuestions || 0}</span></div><div><p className="text-xs uppercase tracking-[0.14em] text-gray-400 mb-2">Latest IDE completion</p><p className="font-medium text-gray-900">{selectedStudent.thinkingSummary?.latestTopic || 'No thinking session yet'}</p><p className="text-xs text-gray-500 mt-1">{formatDate(selectedStudent.thinkingSummary?.latestCompletedAt)}</p></div></div></div>
                                         <div className="rounded-2xl border border-gray-100 p-4"><div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2"><Activity size={15} className="text-blue-600" />Contest + Quiz</div><div className="space-y-3 text-sm text-gray-600"><div className="flex items-center justify-between"><span>Contests played</span><span className="font-semibold text-gray-900">{selectedStudent.ratingProfile?.contestsPlayed || 0}</span></div><div className="flex items-center justify-between"><span>Quiz average</span><span className="font-semibold text-gray-900">{selectedStudent.quizSummary?.averageScore || 0}%</span></div><div className="flex items-center justify-between"><span>Current streak</span><span className="font-semibold text-gray-900">{selectedStudent.streakSummary?.currentStreak || 0}d</span></div><div className="flex items-center justify-between"><span>Last rating change</span><span className="font-semibold text-gray-900">{selectedStudent.ratingProfile?.lastRatingChange || 0}</span></div></div></div>
                                     </div>
 

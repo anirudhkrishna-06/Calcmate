@@ -1,0 +1,13 @@
+& e:\Projects\Calcmate\MathMend-Project-\voice\Scripts\Activate.ps1
+c0e4bea946e10b36b94217457257dd506a3621d7
+
+
+
+
+
+The simple interest on Rs. 2000 at 
+5% per annum for 3 years is Rs. 300
+
+
+The average speed of the car is 
+50 km/h

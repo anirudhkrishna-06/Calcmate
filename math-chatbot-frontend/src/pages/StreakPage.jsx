@@ -34,6 +34,7 @@ export default function StreakPage() {
         activeDays: [],
         totalActivities: 0,
         chatActivities: 0,
+        thinkingActivities: 0,
         quizActivities: 0,
         contestActivities: 0,
         lastActivityAt: null,
@@ -57,6 +58,7 @@ export default function StreakPage() {
                     activeDays: resolvedStreak.activeDays || [],
                     totalActivities: resolvedStreak.totalActivities || resolvedStreak.totalSolved || 0,
                     chatActivities: resolvedStreak.chatActivities || 0,
+                    thinkingActivities: resolvedStreak.thinkingActivities || 0,
                     quizActivities: resolvedStreak.quizActivities || 0,
                     contestActivities: resolvedStreak.contestActivities || 0,
                     lastActivityAt: resolvedStreak.lastActivityAt || null,
@@ -124,7 +126,8 @@ export default function StreakPage() {
 
     const activityMix = [
         { label: 'Questions Asked', value: streakData.chatActivities, icon: MessageSquare, accent: 'from-blue-600 to-cyan-500' },
-        { label: 'Quiz Sessions', value: streakData.quizActivities, icon: Brain, accent: 'from-cyan-600 to-emerald-500' },
+        { label: 'Thinking IDE', value: streakData.thinkingActivities, icon: Brain, accent: 'from-cyan-600 to-emerald-500' },
+        { label: 'Quiz Sessions', value: streakData.quizActivities, icon: Zap, accent: 'from-indigo-600 to-blue-500' },
         { label: 'Contest Runs', value: streakData.contestActivities, icon: Trophy, accent: 'from-amber-500 to-orange-500' },
     ];
 
@@ -155,7 +158,7 @@ export default function StreakPage() {
                                     Learning Streaks
                                 </h1>
                                 <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-300">
-                                    Every meaningful learning action counts here, from asking a question to finishing a quiz or participating in a contest.
+                                    Every meaningful learning action counts here, from asking a question to completing a thinking IDE session, finishing a quiz, or participating in a contest.
                                 </p>
                             </div>
                             <div className="grid grid-cols-2 gap-3 min-w-[280px]">
@@ -223,7 +226,7 @@ export default function StreakPage() {
                                         </div>
                                     </div>
                                     <p className="mt-3 text-sm text-slate-500">
-                                        {index === 0 ? 'Tracked from your chat activity.' : index === 1 ? 'Counted when a quiz session is completed.' : 'Counted after a contest submission is evaluated.'}
+                                        {index === 0 ? 'Tracked from your chat activity.' : index === 1 ? 'Counted when a full thinking IDE session is completed.' : index === 2 ? 'Counted when a quiz session is completed.' : 'Counted after a contest submission is evaluated.'}
                                     </p>
                                 </div>
                             );
@@ -237,7 +240,7 @@ export default function StreakPage() {
                         transition={{ duration: 0.4, delay: 0.4 }}
                     >
                         <h2 className="text-base font-semibold text-gray-900 mb-1">Activity Heatmap</h2>
-                        <p className="text-xs text-gray-400 mb-6">Last 20 weeks of real learning activity across questions, quizzes, and contests</p>
+                        <p className="text-xs text-gray-400 mb-6">Last 20 weeks of real learning activity across questions, thinking sessions, quizzes, and contests</p>
 
                         <div className="overflow-x-auto">
                             <div className="flex gap-1 min-w-max">
@@ -287,7 +290,7 @@ export default function StreakPage() {
                                 Start your streak!
                             </p>
                             <p className="text-xs text-blue-600">
-                                Ask a question, complete a quiz, or join a contest to begin building your streak.
+                                Ask a question, complete a thinking session, take a quiz, or join a contest to begin building your streak.
                             </p>
                         </motion.div>
                     )}

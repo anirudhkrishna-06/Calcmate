@@ -127,15 +127,24 @@ async def validate_answer(payload: ValidateAnswerRequest):
         raise HTTPException(status_code=404, detail="Session not found.")
 
     try:
-        image_bytes = base64.b64decode(payload.image_b64)
+        raw_image_b64 = payload.image_b64 or ""
+        normalized_image_b64 = raw_image_b64.split(",", 1)[1] if "," in raw_image_b64 else raw_image_b64
+        image_bytes = base64.b64decode(normalized_image_b64)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 image data.")
+
+    logger.info(
+        "Validate answer request received | session=%s image_b64_length=%d image_bytes=%d",
+        payload.session_id,
+        len(payload.image_b64 or ""),
+        len(image_bytes),
+    )
 
     problem_text = state.problem_payload.raw_text if state.problem_payload else ""
     if not problem_text:
         raise HTTPException(status_code=400, detail="No problem text available for this session.")
 
-    result = await run_validation(image_bytes, problem_text)
+    result = await run_validation(image_bytes, problem_text, session_id=payload.session_id)
     async with _store.get_lock(payload.session_id):
         refreshed_state = _store.get(payload.session_id)
         if refreshed_state is not None:
@@ -158,13 +167,35 @@ async def validate_answer(payload: ValidateAnswerRequest):
 
 @app.post("/start_tutoring_session", response_model=StartTutoringSessionResponse)
 async def start_tutoring_session(payload: StartTutoringSessionRequest):
-    return await tutoring_service.start_session(payload.report)
+    logger.info(
+        "Tutoring session request received | report_keys=%s",
+        ",".join(sorted((payload.report or {}).keys())) if isinstance(payload.report, dict) else "<invalid>",
+    )
+    response = await tutoring_service.start_session(payload.report)
+    logger.info(
+        "Tutoring session started | tutoring_session_id=%s available=%s",
+        response.tutoring_session_id,
+        response.available,
+    )
+    return response
 
 
 @app.post("/tutoring_chat", response_model=TutoringChatResponse)
 async def tutoring_chat(payload: TutoringChatRequest):
     try:
-        return await tutoring_service.send_message(payload.tutoring_session_id, payload.message)
+        logger.info(
+            "Tutoring chat request received | tutoring_session_id=%s chars=%d",
+            payload.tutoring_session_id,
+            len(payload.message),
+        )
+        response = await tutoring_service.send_message(payload.tutoring_session_id, payload.message)
+        logger.info(
+            "Tutoring chat responded | tutoring_session_id=%s completed=%s understanding_status=%s",
+            payload.tutoring_session_id,
+            response.completed,
+            response.understanding_status,
+        )
+        return response
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
